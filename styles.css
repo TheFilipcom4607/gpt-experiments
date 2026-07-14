@@ -246,7 +246,7 @@ h2 { letter-spacing: -.025em; }
 .ladder-cell small { font-size: .56rem; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
 .ladder-cell.active { background: rgba(20,184,166,.16); border-color: rgba(20,184,166,.5); }
 .ladder-cell.active em { color: var(--accent-soft); }
-.ladder-cell.god { margin-left: auto; background: rgba(255,203,104,.1); border-color: rgba(255,203,104,.3); }
+.ladder-cell.god { background: rgba(255,203,104,.1); border-color: rgba(255,203,104,.3); }
 .ladder-cell.god em { color: var(--warn); }
 .ladder-arrow { align-self: center; color: var(--muted); font-weight: 800; }
 
@@ -255,6 +255,12 @@ h2 { letter-spacing: -.025em; }
 .proof-stats .stat { display: grid; gap: 2px; min-width: 0; padding: 8px 10px; border-radius: 11px; background: rgba(255,255,255,.03); border: 1px solid var(--line); overflow: hidden; }
 .proof-stats .stat em { min-width: 0; max-width: 100%; overflow: hidden; overflow-wrap: anywhere; font-style: normal; font-weight: 800; font-size: 1rem; color: #eaf1f6; font-variant-numeric: tabular-nums; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
 .proof-stats .stat small { font-size: .56rem; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+/* Exact, constantly-ticking total with a terminal-style blinking cursor so the
+   panel visibly keeps moving even while the compact figure holds its rounding. */
+.stat.allchecked em { font-size: .82rem; letter-spacing: -.01em; color: var(--accent-soft); }
+.stat.allchecked em::after { content: '▍'; margin-left: 1px; color: var(--accent); animation: blink 1s step-end infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .stat.allchecked em::after { animation: none; } }
 .progress-spinner { width: 24px; height: 24px; border-radius: 50%; border: 3px solid rgba(255,255,255,.15); border-top-color: var(--warn); animation: solver-spin .8s linear infinite; }
 @keyframes solver-spin { to { transform: rotate(360deg); } }
 .solve-summary { display: grid; justify-items: end; gap: 7px; }

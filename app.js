@@ -131,7 +131,7 @@ function cacheDom() {
     'cubeNet', 'selectedStickerText', 'colorPalette', 'colorCounts', 'validationBox',
     'solveProgress', 'solveProgressTitle', 'solveProgressDetail', 'solveProgressBar', 'solveButton',
     'proofLadder', 'ladderProven', 'ladderDepth', 'ladderBound', 'proofStats',
-    'statNodes', 'statRate', 'statCores', 'statJobs', 'statElapsed',
+    'statNodes', 'statRate', 'statCores', 'statJobs', 'statElapsed', 'statAllNodes',
     'cancelSolveButton', 'rescanButton', 'clearButton', 'moveCounter', 'optimalProof', 'solvedMessage',
     'solutionPlayer', 'cubeViewport', 'cube3d', 'arCamera', 'arToggleButton', 'replayMoveButton',
     'movePosition', 'moveNotation',
@@ -938,6 +938,7 @@ function updateSolveProgress(progress = {}) {
   const rate = secs > 0.2 ? nodes / secs : 0;
   dom.statNodes.textContent = formatCompact(nodes);
   dom.statNodes.title = `${formatInteger(nodes)} positions`;
+  dom.statAllNodes.textContent = formatInteger(nodes);
   dom.statRate.textContent = rate ? formatCompact(rate) : '—';
   dom.statRate.title = rate ? `${formatInteger(rate)} positions / sec` : '';
   dom.statCores.textContent = String(cores);
@@ -1073,7 +1074,7 @@ async function runParallelSolve(cubeJSON, onProgress) {
 
   onProgress({ stage: 'loading', depth: prep.lowerBound, lowerBound: prep.lowerBound, upperBound: prep.quickLength, cores, jobsDone: 0, jobsTotal: 0, nodes: 0, elapsedMs: Date.now() - started });
   await Promise.all(pool.map((entry) =>
-    requestOnce(entry.worker, { type: 'loadSlice', upright: prep.upright, rotation: prep.rotation, reportEvery: 400000 }, 'sliceReady'),
+    requestOnce(entry.worker, { type: 'loadSlice', upright: prep.upright, rotation: prep.rotation, reportEvery: 250000 }, 'sliceReady'),
   ));
 
   for (let depth = prep.lowerBound; depth <= prep.lastDepth; depth++) {

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'twenty-v7-telemetry-fit';
+const CACHE_NAME = 'twenty-v8-live-counter';
 const APP_SHELL = [
   './',
   './index.html',
