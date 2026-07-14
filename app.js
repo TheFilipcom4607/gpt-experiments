@@ -86,7 +86,11 @@ const MOVE_GEOMETRY = {
 
 let deferredInstallPrompt = null;
 let toastTimer = null;
-let solverWorker = null;
+// Pool of solver workers, one per available core, so the exact-optimal proof can
+// be searched in parallel. Falls back to a single worker where only one exists.
+let solverPool = [];
+const SOLVER_POOL_SIZE = Math.max(1, Math.min((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4, 8));
+let activeSolveReject = null;
 let wakeLock = null;
 let solverReadyResolve;
 let solverReadyReject;
@@ -102,7 +106,6 @@ function resetSolverReadyPromise() {
   });
 }
 let workerRequestId = 0;
-const workerRequests = new Map();
 
 window.addEventListener('DOMContentLoaded', init);
 
@@ -110,7 +113,7 @@ function init() {
   cacheDom();
   bindEvents();
   loadSavedState();
-  initSolverWorker();
+  initSolverPool();
   initInstallHandling();
   registerServiceWorker();
   renderHomeState();
@@ -127,10 +130,14 @@ function cacheDom() {
     'cameraMessage', 'torchButton', 'backFaceButton', 'captureButton', 'skipToReviewButton',
     'cubeNet', 'selectedStickerText', 'colorPalette', 'colorCounts', 'validationBox',
     'solveProgress', 'solveProgressTitle', 'solveProgressDetail', 'solveProgressBar', 'solveButton',
+    'proofLadder', 'ladderProven', 'ladderDepth', 'ladderBound', 'proofStats',
+    'statNodes', 'statRate', 'statCores', 'statJobs', 'statElapsed',
     'cancelSolveButton', 'rescanButton', 'clearButton', 'moveCounter', 'optimalProof', 'solvedMessage',
-    'solutionPlayer', 'cubeViewport', 'cube3d', 'replayMoveButton', 'movePosition', 'moveNotation',
+    'solutionPlayer', 'cubeViewport', 'cube3d', 'arCamera', 'arToggleButton', 'replayMoveButton',
+    'movePosition', 'moveNotation',
     'moveInstruction', 'previousMoveButton', 'nextMoveButton', 'algorithmText',
-    'newScanButton', 'toast'
+    'newScanButton', 'toast',
+    'solveComplete', 'solveCompleteTitle', 'solveCompleteSummary', 'solveCompleteReplay', 'solveCompleteScan'
   ];
   ids.forEach((id) => { dom[id] = document.getElementById(id); });
 }
@@ -154,7 +161,11 @@ function bindEvents() {
   dom.previousMoveButton.addEventListener('click', () => setSolutionStep(state.solutionIndex - 1));
   dom.nextMoveButton.addEventListener('click', nextSolutionStep);
   dom.replayMoveButton.addEventListener('click', () => previewTurn3D(state.solution[state.solutionIndex]));
+  dom.arToggleButton.addEventListener('click', toggleAR);
   dom.newScanButton.addEventListener('click', clearScan);
+  dom.solveCompleteScan.addEventListener('click', () => { hideSolveComplete(); clearScan(); });
+  dom.solveCompleteReplay.addEventListener('click', () => { hideSolveComplete(); setSolutionStep(0); });
+  dom.solveComplete.addEventListener('click', (event) => { if (event.target === dom.solveComplete) hideSolveComplete(); });
   window.addEventListener('resize', () => {
     positionCameraShades();
     if (dom.solveView.classList.contains('active')) sizeCube3D();
@@ -174,6 +185,7 @@ function showView(id) {
   document.querySelectorAll('.view').forEach((view) => view.classList.toggle('active', view.id === id));
   dom.homeButton.classList.toggle('hidden', id === 'homeView');
   window.scrollTo({ top: 0, behavior: 'auto' });
+  if (id !== 'solveView') stopAR();
   if (id === 'solveView') requestAnimationFrame(sizeCube3D);
 }
 
@@ -281,6 +293,55 @@ function stopCamera() {
   dom.torchButton.classList.add('hidden');
   dom.torchButton.classList.remove('active');
   dom.camera.srcObject = null;
+}
+
+// Opt-in AR overlay: the rear camera behind the transparent CSS cube. Reuses the
+// same getUserMedia constraints and secure-context / permission handling as the
+// scanner, but with its own stream so it never clashes with scanning.
+let arStream = null;
+
+async function toggleAR() {
+  if (arStream) { stopAR(); return; }
+  await startAR();
+}
+
+async function startAR() {
+  if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+    showToast('AR view needs HTTPS or localhost to use the camera.');
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showToast('This browser does not expose the camera API.');
+    return;
+  }
+  try {
+    arStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' } },
+    });
+    dom.arCamera.srcObject = arStream;
+    await dom.arCamera.play();
+    dom.arCamera.classList.remove('hidden');
+    dom.cubeViewport.closest('.move-visual-card')?.classList.add('ar-active');
+    dom.arToggleButton.classList.add('active');
+    dom.arToggleButton.setAttribute('aria-pressed', 'true');
+    dom.arToggleButton.textContent = 'Exit AR';
+  } catch (error) {
+    stopAR();
+    const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError';
+    showToast(denied ? 'Camera access was denied for AR view.' : `AR view could not start: ${error?.message || error}`);
+  }
+}
+
+function stopAR() {
+  if (arStream) arStream.getTracks().forEach((track) => track.stop());
+  arStream = null;
+  dom.arCamera.srcObject = null;
+  dom.arCamera.classList.add('hidden');
+  dom.cubeViewport.closest('.move-visual-card')?.classList.remove('ar-active');
+  dom.arToggleButton.classList.remove('active');
+  dom.arToggleButton.setAttribute('aria-pressed', 'false');
+  dom.arToggleButton.textContent = 'AR view';
 }
 
 function showCameraError(message) {
@@ -776,11 +837,17 @@ async function solveCube() {
   try {
     await acquireWakeLock();
     await solverReady;
-    const result = await callSolver(
-      'solve',
-      { cube: validation.cube.toJSON() },
-      updateSolveProgress,
-    );
+    const cubeJSON = validation.cube.toJSON();
+    let result;
+    const abort = new Promise((_, reject) => { activeSolveReject = reject; });
+    try {
+      result = await Promise.race([runParallelSolve(cubeJSON, updateSolveProgress), abort]);
+    } catch (poolError) {
+      if (state.solveCancelled) throw poolError;
+      if (!solverPool.length) throw poolError;
+      // Fall back to a single-worker exact solve on unexpected pool failure.
+      result = await requestOnce(solverPool[0].worker, { type: 'solve', cube: cubeJSON }, 'solution', updateSolveProgress);
+    }
     const algorithm = result.algorithm || '';
     const verification = validation.cube.clone();
     if (algorithm) verification.move(algorithm);
@@ -799,6 +866,7 @@ async function solveCube() {
       showToast(`Solver error: ${error?.message || error}`);
     }
   } finally {
+    activeSolveReject = null;
     state.solving = false;
     dom.solveProgress.classList.add('hidden');
     dom.cancelSolveButton.classList.add('hidden');
@@ -827,43 +895,81 @@ async function releaseWakeLock() {
 }
 
 function updateSolveProgress(progress = {}) {
-  if (progress.stage === 'upper-bound') {
-    dom.solveProgressTitle.textContent = 'Finding an upper bound…';
-    dom.solveProgressDetail.textContent = 'First finding a short solution, then proving whether anything shorter exists.';
+  const stage = progress.stage;
+
+  if (stage === 'upper-bound') {
+    dom.solveProgressTitle.textContent = 'Cracking a first solution…';
+    dom.solveProgressDetail.textContent = 'Running a fast two-phase solve for an upper bound — then the exhaustive proof begins.';
+    dom.proofLadder.style.display = 'none';
+    dom.proofStats.style.display = 'none';
     dom.solveProgressBar.style.width = '4%';
     return;
   }
 
-  if (progress.stage === 'proof-search') {
-    dom.solveProgressTitle.textContent = `Proving depth ${progress.depth} of at most ${progress.upperBound}…`;
-    const parts = [];
-    if (Number.isFinite(progress.nodes)) {
-      parts.push(`${formatInteger(progress.nodes)} positions checked`);
-      if (progress.elapsedMs > 1500) parts.push(`${formatInteger(progress.nodes / (progress.elapsedMs / 1000))}/s`);
-    }
-    parts.push('Keep this page open.');
-    dom.solveProgressDetail.textContent = parts.join(' · ');
-    if (Number.isFinite(progress.depth) && Number.isFinite(progress.upperBound) && progress.upperBound > 0) {
-      const percent = Math.max(4, Math.min(96, Math.round((progress.depth / progress.upperBound) * 100)));
-      dom.solveProgressBar.style.width = `${percent}%`;
-    }
+  if (stage === 'loading') {
+    const cores = progress.cores || 1;
+    dom.solveProgressTitle.textContent = `Arming ${cores} core${cores === 1 ? '' : 's'}…`;
+    dom.solveProgressDetail.textContent = 'Splitting the move tree into independent branches for the pool.';
+    dom.solveProgressBar.style.width = '6%';
+    return;
   }
+
+  if (stage !== 'proof-search') return;
+
+  const cores = progress.cores || 1;
+  const depth = progress.depth;
+  const upper = progress.upperBound;
+
+  dom.solveProgressTitle.textContent = Number.isFinite(depth)
+    ? `Proving depth ${depth} — ruling out every ${depth}-move solution`
+    : 'Proving optimality…';
+  dom.solveProgressDetail.textContent = cores > 1
+    ? `Exhaustively expanding the move tree with 3-axis admissible pruning across ${cores} cores. Anything that survives could beat ${upper}.`
+    : `Exhaustively expanding the move tree with 3-axis admissible pruning. Anything that survives could beat ${upper}.`;
+
+  dom.proofLadder.style.display = '';
+  dom.ladderProven.textContent = Number.isFinite(depth) ? String(depth - 1) : '–';
+  dom.ladderDepth.textContent = Number.isFinite(depth) ? String(depth) : '–';
+  dom.ladderBound.textContent = Number.isFinite(upper) ? String(upper) : '–';
+
+  dom.proofStats.style.display = '';
+  const nodes = Number.isFinite(progress.nodes) ? progress.nodes : 0;
+  const secs = (progress.elapsedMs || 0) / 1000;
+  const rate = secs > 0.2 ? nodes / secs : 0;
+  dom.statNodes.textContent = formatInteger(nodes);
+  dom.statRate.textContent = rate ? formatInteger(rate) : '—';
+  dom.statCores.textContent = String(cores);
+  dom.statJobs.textContent = (Number.isFinite(progress.jobsTotal) && progress.jobsTotal > 0)
+    ? `${formatInteger(progress.jobsDone || 0)} / ${formatInteger(progress.jobsTotal)}`
+    : '—';
+  dom.statElapsed.textContent = formatDuration(progress.elapsedMs || 0);
+
+  // Honest progress bar: the fraction of this depth's branches already cleared.
+  let percent;
+  if (Number.isFinite(progress.jobsTotal) && progress.jobsTotal > 0) {
+    percent = Math.round(((progress.jobsDone || 0) / progress.jobsTotal) * 100);
+  } else if (Number.isFinite(depth) && Number.isFinite(upper) && upper > 0) {
+    percent = Math.round((depth / upper) * 100);
+  } else {
+    percent = 8;
+  }
+  dom.solveProgressBar.style.width = `${Math.max(4, Math.min(100, percent))}%`;
 }
 
 function cancelOptimalSearch() {
   if (!state.solving || state.solveCancelled) return;
   state.solveCancelled = true;
   dom.cancelSolveButton.disabled = true;
-  if (solverWorker) solverWorker.terminate();
-  solverWorker = null;
-  workerRequests.forEach(({ reject }) => reject(new Error('Search cancelled.')));
-  workerRequests.clear();
+  if (activeSolveReject) activeSolveReject(new Error('Search cancelled.'));
+  activeSolveReject = null;
+  solverPool.forEach((entry) => entry.worker.terminate());
+  solverPool = [];
   resetSolverReadyPromise();
   setSolverStatus('Restarting solver…', 'loading');
-  initSolverWorker();
+  initSolverPool();
 }
 
-function initSolverWorker() {
+function initSolverPool() {
   const readyResolve = solverReadyResolve;
   const readyReject = solverReadyReject;
   if (!window.Worker) {
@@ -872,19 +978,21 @@ function initSolverWorker() {
     return;
   }
   try {
-    const worker = new Worker('solver/worker.js');
-    solverWorker = worker;
-    worker.addEventListener('message', handleWorkerMessage);
-    worker.addEventListener('error', (event) => {
-      if (worker !== solverWorker) return;
-      const error = new Error(event.message || 'Solver worker failed.');
-      setSolverStatus('Solver failed', 'error');
-      workerRequests.forEach(({ reject }) => reject(error));
-      workerRequests.clear();
-      readyReject(error);
-    });
-    callSolver('init').then(() => {
-      setSolverStatus('Optimal solver ready', 'ready');
+    solverPool = [];
+    for (let i = 0; i < SOLVER_POOL_SIZE; i++) {
+      const worker = new Worker('solver/worker.js');
+      const entry = { worker, index: i };
+      worker.addEventListener('error', (event) => {
+        setSolverStatus('Solver failed', 'error');
+        readyReject(new Error(event.message || 'Solver worker failed.'));
+      });
+      solverPool.push(entry);
+    }
+    Promise.all(solverPool.map((entry) =>
+      requestOnce(entry.worker, { type: 'init', workerIndex: entry.index }, 'ready'),
+    )).then(() => {
+      const cores = solverPool.length;
+      setSolverStatus(cores > 1 ? `Optimal solver ready · ${cores} cores` : 'Optimal solver ready', 'ready');
       readyResolve();
     }).catch((error) => {
       setSolverStatus('Solver failed', 'error');
@@ -896,37 +1004,174 @@ function initSolverWorker() {
   }
 }
 
-function callSolver(type, payload = {}, onProgress = null) {
-  if (!solverWorker) return Promise.reject(new Error('Solver worker is unavailable.'));
+// One request/response round-trip with a worker, matched by message id. Progress
+// frames ('progress'/'sliceProgress') are streamed to onProgress without
+// settling the promise.
+function requestOnce(worker, message, doneType, onProgress = null) {
   const id = ++workerRequestId;
   return new Promise((resolve, reject) => {
-    workerRequests.set(id, { resolve, reject, onProgress });
-    solverWorker.postMessage({ type, id, ...payload });
+    const listener = (event) => {
+      const data = event.data || {};
+      if (data.id !== id) return;
+      if (data.type === 'progress' || data.type === 'sliceProgress') {
+        onProgress?.(data);
+        return;
+      }
+      worker.removeEventListener('message', listener);
+      if (data.type === 'error') reject(new Error(data.message || 'Solver error.'));
+      else resolve(data);
+    };
+    worker.addEventListener('message', listener);
+    worker.postMessage({ ...message, id });
   });
 }
 
-function handleWorkerMessage(event) {
-  const data = event.data || {};
-  const { type, id, message } = data;
-  const request = workerRequests.get(id);
-  if (!request) return;
+// Move-pruning face table (mirrors nextMoves1 in solve.js): the faces allowed
+// after a given last face. Keeps generated root prefixes on the solver's own
+// canonical move ordering.
+function nextFacesFor(lastFace) {
+  const faces = [];
+  for (let face = 0; face < 6; face++) {
+    if (face !== lastFace && face !== lastFace - 3) faces.push(face);
+  }
+  return faces;
+}
 
-  if (type === 'progress') {
-    request.onProgress?.(data);
-    return;
+// Split an optimal search of total length `depth` into independent subtree jobs
+// by fixing the first two moves (~240 jobs — enough to keep the pool balanced).
+// Shallow depths run as a single whole-tree job.
+function buildDepthPrefixes(depth) {
+  if (depth < 2) return [null];
+  const prefixes = [];
+  for (let m0 = 0; m0 < 18; m0++) {
+    const f0 = (m0 / 3) | 0;
+    for (const f1 of nextFacesFor(f0)) {
+      for (let p = 0; p < 3; p++) prefixes.push([m0, f1 * 3 + p]);
+    }
+  }
+  return prefixes;
+}
+
+// Coordinate the parallel optimal proof across the pool. Optimality is preserved:
+// depths are attempted in increasing order and a depth is declared solution-free
+// only after every one of its jobs has completed.
+async function runParallelSolve(cubeJSON, onProgress) {
+  const pool = solverPool;
+  if (!pool.length) throw new Error('Solver pool is unavailable.');
+  const cores = pool.length;
+  const started = Date.now();
+  const perWorkerNodes = new Array(cores).fill(0);
+  const totalNodes = () => perWorkerNodes.reduce((a, b) => a + b, 0);
+
+  onProgress({ stage: 'upper-bound' });
+  const prep = await requestOnce(pool[0].worker, { type: 'prepare', cube: cubeJSON, maxDepth: 20 }, 'prepared');
+  if (prep.solved) {
+    return { algorithm: '', optimalLength: 0, quickLength: 0, nodes: 0, elapsedMs: Date.now() - started, searchedThrough: 0, cores };
   }
 
-  workerRequests.delete(id);
-  if (type === 'error') request.reject(new Error(message || 'Solver error.'));
-  else if (type === 'solution') request.resolve({
-    algorithm: data.algorithm || '',
-    optimalLength: data.optimalLength,
-    quickLength: data.quickLength,
-    nodes: data.nodes,
-    elapsedMs: data.elapsedMs,
-    searchedThrough: data.searchedThrough,
+  onProgress({ stage: 'loading', depth: prep.lowerBound, lowerBound: prep.lowerBound, upperBound: prep.quickLength, cores, jobsDone: 0, jobsTotal: 0, nodes: 0, elapsedMs: Date.now() - started });
+  await Promise.all(pool.map((entry) =>
+    requestOnce(entry.worker, { type: 'loadSlice', upright: prep.upright, rotation: prep.rotation, reportEvery: 400000 }, 'sliceReady'),
+  ));
+
+  for (let depth = prep.lowerBound; depth <= prep.lastDepth; depth++) {
+    const found = await runDepth(depth, prep, perWorkerNodes, onProgress, started, cores);
+    if (found) {
+      return {
+        algorithm: found.algorithm,
+        optimalLength: found.optimalLength,
+        quickLength: prep.quickLength,
+        nodes: totalNodes(),
+        elapsedMs: Date.now() - started,
+        searchedThrough: depth,
+        cores,
+      };
+    }
+  }
+
+  // Nothing shorter than the quick bound exists, so it is provably optimal.
+  return {
+    algorithm: prep.quickAlgorithm,
+    optimalLength: prep.quickLength,
+    quickLength: prep.quickLength,
+    nodes: totalNodes(),
+    elapsedMs: Date.now() - started,
+    searchedThrough: prep.lastDepth,
+    cores,
+  };
+}
+
+// Search one total depth across the pool through a work queue. Resolves with the
+// winning result as soon as any job finds a solution, or null once every job at
+// this depth has finished with none.
+function runDepth(depth, prep, perWorkerNodes, onProgress, started, cores) {
+  return new Promise((resolve, reject) => {
+    const prefixes = buildDepthPrefixes(depth);
+    const jobsTotal = prefixes.length;
+    let jobsDone = 0;
+    let next = 0;
+    let outstanding = 0;
+    let settled = false;
+
+    const emit = () => onProgress({
+      stage: 'proof-search', depth, lowerBound: prep.lowerBound, upperBound: prep.quickLength,
+      cores, jobsDone, jobsTotal, nodes: perWorkerNodes.reduce((a, b) => a + b, 0), elapsedMs: Date.now() - started,
+    });
+
+    function assign(entry) {
+      if (settled || next >= prefixes.length) return;
+      const jobId = next++;
+      outstanding++;
+      entry.worker.postMessage({ type: 'sliceDepth', depth, prefix: prefixes[jobId], upperBound: prep.quickLength, jobId });
+    }
+
+    function cleanup() {
+      solverPool.forEach((entry, i) => entry.worker.removeEventListener('message', listeners[i]));
+    }
+
+    function onMessage(event) {
+      const data = event.data || {};
+      if (typeof data.workerIndex !== 'number') return;
+      if (data.type === 'sliceProgress') {
+        perWorkerNodes[data.workerIndex] = data.nodes;
+        if (!settled) emit();
+        return;
+      }
+      if (data.type === 'error') {
+        if (!settled) { settled = true; cleanup(); reject(new Error(data.message || 'Slice error.')); }
+        return;
+      }
+      if (data.type !== 'sliceResult') return;
+      outstanding--;
+      jobsDone++;
+      if (typeof data.nodes === 'number') perWorkerNodes[data.workerIndex] = data.nodes;
+      if (data.found && !settled) {
+        settled = true;
+        cleanup();
+        emit();
+        resolve({ algorithm: data.algorithm, optimalLength: data.optimalLength });
+        return;
+      }
+      if (settled) return;
+      emit();
+      assign(solverPool[data.workerIndex]);
+      if (next >= prefixes.length && outstanding === 0) {
+        settled = true;
+        cleanup();
+        resolve(null);
+      }
+    }
+
+    const listeners = solverPool.map((entry) => {
+      const listener = (event) => onMessage(event);
+      entry.worker.addEventListener('message', listener);
+      return listener;
+    });
+
+    emit();
+    solverPool.forEach((entry) => assign(entry));
+    if (outstanding === 0) { settled = true; cleanup(); resolve(null); }
   });
-  else request.resolve(true);
 }
 
 function setSolverStatus(text, statusClass) {
@@ -935,16 +1180,19 @@ function setSolverStatus(text, statusClass) {
 }
 
 function renderSolution() {
+  dom.solveComplete.classList.remove('show');
+  dom.solveComplete.classList.add('hidden');
   const solved = state.solution.length === 0;
   dom.solvedMessage.classList.toggle('hidden', !solved);
   dom.solutionPlayer.classList.toggle('hidden', solved);
   dom.moveCounter.textContent = solved ? '0 moves' : `${state.solution.length} move${state.solution.length === 1 ? '' : 's'}`;
   const meta = state.solutionMeta;
-  if (meta && Number.isFinite(meta.nodes)) {
+  if (meta && Number.isFinite(meta.nodes) && meta.nodes > 0) {
     const duration = formatDuration(meta.elapsedMs || 0);
-    dom.optimalProof.textContent = `Shortest possible in HTM · ${formatInteger(meta.nodes)} nodes checked · ${duration}`;
+    const coreText = meta.cores && meta.cores > 1 ? ` across ${meta.cores} cores` : '';
+    dom.optimalProof.textContent = `Provably optimal · ${formatInteger(meta.nodes)} positions checked${coreText} in ${duration} to rule out every shorter sequence`;
   } else {
-    dom.optimalProof.textContent = 'Shortest possible in the half-turn metric.';
+    dom.optimalProof.textContent = 'Provably optimal in the half-turn metric.';
   }
   dom.algorithmText.innerHTML = '';
 
@@ -1074,16 +1322,48 @@ function nextSolutionStep() {
   if (!state.solution.length || view3d.animating) return;
   const i = state.solutionIndex;
   const isLast = i >= state.solution.length - 1;
-  // Already fully applied (last move performed): don't re-apply, just remind.
+  // Already fully applied (last move performed): don't re-apply, just celebrate.
   if (isLast && view3d.index >= state.solution.length) {
-    showToast('Done — your cube should now be solved.');
+    showSolveComplete();
     return;
   }
   // Commit the described move with an animated turn, then advance the label.
   animateMove3D(state.solution[i], () => {
-    if (isLast) showToast('Done — your cube should now be solved.');
+    if (isLast) showSolveComplete();
   });
   if (!isLast) updateStepDescriptor(i + 1);
+}
+
+// Prominent end-of-playback celebration (replaces the barely-visible toast).
+function showSolveComplete() {
+  const n = state.solution.length;
+  const optimal = state.solutionMeta && Number.isFinite(state.solutionMeta.optimalLength)
+    ? state.solutionMeta.optimalLength : n;
+  dom.solveCompleteSummary.textContent =
+    `All ${n} move${n === 1 ? '' : 's'} done — your cube is solved in ${optimal}, the fewest turns physically possible.`;
+  const confetti = dom.solveComplete.querySelector('.confetti');
+  if (confetti && !prefersReducedMotion()) {
+    confetti.innerHTML = '';
+    const colors = ['#55d89a', '#14b8a6', '#0e9ad2', '#ffcb68', '#ff6b8a', '#ffffff'];
+    for (let i = 0; i < 16; i++) {
+      const piece = document.createElement('i');
+      piece.style.left = `${Math.random() * 100}%`;
+      piece.style.background = colors[i % colors.length];
+      piece.style.animationDelay = `${Math.random() * 0.25}s`;
+      piece.style.animationDuration = `${0.9 + Math.random() * 0.6}s`;
+      confetti.appendChild(piece);
+    }
+  }
+  dom.solveComplete.classList.remove('hidden');
+  requestAnimationFrame(() => dom.solveComplete.classList.add('show'));
+  if (navigator.vibrate) {
+    try { navigator.vibrate([14, 40, 14, 40, 28]); } catch { /* haptics unsupported */ }
+  }
+}
+
+function hideSolveComplete() {
+  dom.solveComplete.classList.remove('show');
+  setTimeout(() => dom.solveComplete.classList.add('hidden'), 260);
 }
 
 function moveInstruction(face, suffix) {
@@ -1130,6 +1410,26 @@ function turnParams(token) {
   };
 }
 
+// Rotate a layer to `angleDeg` about its axis. The starting transform is first
+// pinned to `rotateAxis(0deg) translate3d(...)` — matching the target's
+// two-function list — with the transition suppressed, then a forced reflow
+// commits it before we animate. This makes CSS interpolate the rotation function
+// directly instead of decomposing the whole matrix, which is what made 180°
+// (double) turns collapse the layer through the cube centre.
+function startLayerTurn(params, angleDeg) {
+  params.layer.forEach((c) => {
+    c.el.style.transitionDuration = '0ms';
+    c.el.classList.add('turning');
+    c.el.style.transform = `rotate${params.geo.axis}(0deg) ${c.homePos}`;
+  });
+  // Force a reflow so the pinned 0deg start state is committed before animating.
+  void dom.cube3d.offsetWidth;
+  params.layer.forEach((c) => {
+    c.el.style.transitionDuration = `${params.duration}ms`;
+    c.el.style.transform = `rotate${params.geo.axis}(${angleDeg}deg) ${c.homePos}`;
+  });
+}
+
 // Animate a move and bake it into the displayed cube state.
 function animateMove3D(token, done) {
   const params = view3d.displayCube ? turnParams(token) : null;
@@ -1146,11 +1446,7 @@ function animateMove3D(token, done) {
   };
   if (prefersReducedMotion()) { commit(); return; }
   view3d.animating = true;
-  params.layer.forEach((c) => {
-    c.el.style.transitionDuration = `${params.duration}ms`;
-    c.el.classList.add('turning');
-    c.el.style.transform = `rotate${params.geo.axis}(${params.angle}deg) ${c.homePos}`;
-  });
+  startLayerTurn(params, params.angle);
   clearTimeout(view3d.animTimer);
   view3d.animTimer = setTimeout(commit, params.duration + 40);
 }
@@ -1162,11 +1458,7 @@ function previewTurn3D(token) {
   if (!params) return;
   if (prefersReducedMotion()) return;
   view3d.animating = true;
-  params.layer.forEach((c) => {
-    c.el.style.transitionDuration = `${params.duration}ms`;
-    c.el.classList.add('turning');
-    c.el.style.transform = `rotate${params.geo.axis}(${params.angle}deg) ${c.homePos}`;
-  });
+  startLayerTurn(params, params.angle);
   clearTimeout(view3d.animTimer);
   view3d.animTimer = setTimeout(() => {
     params.layer.forEach((c) => { c.el.style.transform = `rotate${params.geo.axis}(0deg) ${c.homePos}`; });
@@ -1251,7 +1543,7 @@ function initInstallHandling() {
   window.addEventListener('appinstalled', () => {
     deferredInstallPrompt = null;
     dom.installButton.classList.add('hidden');
-    showToast('CubeScan installed.');
+    showToast('TWENTY installed.');
   });
   dom.installButton.addEventListener('click', async () => {
     if (deferredInstallPrompt) {

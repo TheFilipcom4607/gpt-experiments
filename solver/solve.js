@@ -1212,6 +1212,326 @@
     throw new Error('No solution was found within 20 HTM moves. This indicates an internal solver error.');
   };
 
+
+  // Reusable exact-optimal searcher, shared by the single-thread driver above
+  // and the parallel worker pool. It holds the phase-1/phase-2 kernel and lets a
+  // caller run a *single* total depth, optionally restricting the first plies to
+  // a fixed prefix so independent subtrees can be searched on different cores.
+  //
+  //   searcher = Cube.buildOptimalSearcher(uprightCube, reportEvery, onProgress)
+  //   result   = searcher.run(totalDepth, prefix /* [m0, m1] or null */, upperBound)
+  //   result -> { found, solutionLength, nodes }
+  //
+  // When `found`, the move sequence is in searcher.moveStack[0 .. solutionLength).
+  // The kernel is a faithful copy of solveOptimalUpright's inner loops; the only
+  // differences are (a) the optional root prefix and (b) the admissible pruning
+  // checks are ordered strongest-first (twistFlip, then sliceTwist, then
+  // sliceFlip) so hopeless branches are rejected a lookup or two sooner. Check
+  // order never changes which nodes are pruned, only how quickly.
+  var buildOptimalSearcher = function(cube, reportEvery, onProgress) {
+    reportEvery = reportEvery == null ? 500000 : Math.max(1000, reportEvery);
+    onProgress = typeof onProgress === 'function' ? onProgress : function() {};
+
+    var moveNames = (function() {
+      var face, faceName, m, o, power, powerName, result;
+      faceName = ['U', 'R', 'F', 'D', 'L', 'B'];
+      powerName = ['', '2', "'"];
+      result = [];
+      for (face = m = 0; m <= 5; face = ++m) {
+        for (power = o = 0; o <= 2; power = ++o) {
+          result.push(faceName[face] + powerName[power]);
+        }
+      }
+      return result;
+    })();
+
+    // Move translation into the x- and z-conjugated coordinate systems, so the
+    // phase-1 bound can be evaluated on all three cube axes (UD, FB, RL).
+    var axisMove1 = new Int32Array(18);
+    var axisMove2 = new Int32Array(18);
+    (function() {
+      var faceMap1 = [5, 1, 0, 2, 4, 3]; // conjugation by x
+      var faceMap2 = [1, 3, 2, 4, 0, 5]; // conjugation by z
+      for (var move = 0; move < 18; move++) {
+        axisMove1[move] = faceMap1[move / 3 | 0] * 3 + move % 3;
+        axisMove2[move] = faceMap2[move / 3 | 0] * 3 + move % 3;
+      }
+    })();
+    var conjugateCube = function(c, rotation) {
+      return new Cube().move(Cube.inverse(rotation)).multiply(c).move(rotation);
+    };
+
+    var flipMove = Cube.moveTables.flip;
+    var twistMove = Cube.moveTables.twist;
+    var sliceMove = Cube.moveTables.slice;
+    var FRtoBRMove = Cube.moveTables.FRtoBR;
+    var URFtoDLFMove = Cube.moveTables.URFtoDLF;
+    var URtoDFMove = Cube.moveTables.URtoDF;
+    var URtoULMove = Cube.moveTables.URtoUL;
+    var UBtoDFMove = Cube.moveTables.UBtoDF;
+    var mergeTable = Cube.moveTables.mergeURtoDF;
+    var pruneSliceFlip = Cube.pruningTables.sliceFlip;
+    var pruneSliceTwist = Cube.pruningTables.sliceTwist;
+    var pruneTwistFlip = Cube.pruningTables.twistFlip;
+    var pruneP2URtoDF = Cube.pruningTables.sliceURtoDFParity;
+    var pruneP2URFtoDLF = Cube.pruningTables.sliceURFtoDLFParity;
+
+    var isMove2 = new Uint8Array(18);
+    for (var mi = 0; mi < allMoves2.length; mi++) {
+      isMove2[allMoves2[mi]] = 1;
+    }
+
+    var axisCubes = [cube, conjugateCube(cube, 'x'), conjugateCube(cube, 'z')];
+    var rootFlip = [axisCubes[0].flip(), axisCubes[1].flip(), axisCubes[2].flip()];
+    var rootTwist = [axisCubes[0].twist(), axisCubes[1].twist(), axisCubes[2].twist()];
+    var rootSlice = [
+      axisCubes[0].FRtoBR() / N_SLICE2 | 0,
+      axisCubes[1].FRtoBR() / N_SLICE2 | 0,
+      axisCubes[2].FRtoBR() / N_SLICE2 | 0
+    ];
+    var rootFRtoBR = cube.FRtoBR();
+    var rootParity = cube.cornerParity();
+    var rootURFtoDLF = cube.URFtoDLF();
+    var rootURtoUL = cube.URtoUL();
+    var rootUBtoDF = cube.UBtoDF();
+
+    // Distance to the phase-2 subgroup, admissible in the full HTM move graph.
+    var lowerBound = 0;
+    for (var ax = 0; ax < 3; ax++) {
+      var rootDist = max(
+        pruning(pruneSliceFlip, rootFlip[ax] * N_SLICE1 + rootSlice[ax]),
+        pruning(pruneSliceTwist, rootTwist[ax] * N_SLICE1 + rootSlice[ax])
+      );
+      rootDist = max(rootDist, pruning(pruneTwistFlip, rootTwist[ax] * N_FLIP + rootFlip[ax]));
+      lowerBound = max(lowerBound, rootDist);
+    }
+
+    var moveStack = new Int32Array(32);
+    var nodes = 0;
+    var solutionLength = -1;
+    var searchStarted = Date.now();
+    var totalDepth = 0;
+    var upperBound = 0;
+    var prefixMoves = null;
+    var prefixLen = 0;
+
+    // Exhaustive search of the phase-2 subgroup for a solution of exactly
+    // `remaining` more moves.
+    var phase2Search = function(URtoDF, FRtoBR, URFtoDLF, parity, lastMove, remaining, depth) {
+      var d1, d2, i1, i2, m, moves;
+      nodes++;
+      if (nodes % reportEvery === 0) {
+        onProgress({ stage: 'proof-search', depth: totalDepth, upperBound: upperBound, nodes: nodes, elapsedMs: Date.now() - searchStarted });
+      }
+      i1 = (URtoDF * 24 + FRtoBR) * 2 + parity;
+      d1 = (pruneP2URtoDF[i1 >> 3] >>> ((i1 & 7) << 2)) & 0xF;
+      if (d1 > remaining) {
+        return false;
+      }
+      i2 = (URFtoDLF * 24 + FRtoBR) * 2 + parity;
+      d2 = (pruneP2URFtoDLF[i2 >> 3] >>> ((i2 & 7) << 2)) & 0xF;
+      if (d2 > remaining) {
+        return false;
+      }
+      if (remaining === 0) {
+        // Both pruning distances are zero only for the solved state.
+        if (d1 === 0 && d2 === 0) {
+          solutionLength = depth;
+          return true;
+        }
+        return false;
+      }
+      moves = lastMove < 0 ? allMoves2 : nextMoves2[lastMove / 3 | 0];
+      for (var im = 0; im < moves.length; im++) {
+        m = moves[im];
+        moveStack[depth] = m;
+        if (phase2Search(
+          URtoDFMove[URtoDF * 18 + m],
+          FRtoBRMove[FRtoBR * 18 + m],
+          URFtoDLFMove[URFtoDLF * 18 + m],
+          m % 3 === 1 ? parity : parity ^ 1,
+          m, remaining - 1, depth + 1
+        )) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    // Depth-limited exhaustive search over the full move group. If `depth` is
+    // still inside the fixed prefix, only the prefix move at that ply is tried.
+    var search1 = function(f0, t0, s0, f1, t1, s1, f2, t2, s2, FRtoBR, parity, URFtoDLF, URtoUL, UBtoDF, lastMove, remaining, depth) {
+      var idx, m, m1, m2, merged, moves, nf0, nf1, nf2, ns0, ns1, ns2, nt0, nt1, nt2, rem;
+      nodes++;
+      if (nodes % reportEvery === 0) {
+        onProgress({ stage: 'proof-search', depth: totalDepth, upperBound: upperBound, nodes: nodes, elapsedMs: Date.now() - searchStarted });
+      }
+      if ((f0 | t0 | s0) === 0 && (lastMove < 0 || isMove2[lastMove] === 0)) {
+        merged = mergeTable[URtoUL * 336 + UBtoDF];
+        if (merged >= 0 && phase2Search(merged, FRtoBR, URFtoDLF, parity, lastMove, remaining, depth)) {
+          return true;
+        }
+      }
+      if (remaining === 0) {
+        return false;
+      }
+      rem = remaining - 1;
+      if (depth < prefixLen) {
+        moves = prefixMoves[depth];
+      } else {
+        moves = lastMove < 0 ? allMoves1 : nextMoves1[lastMove / 3 | 0];
+      }
+      for (var im = 0; im < moves.length; im++) {
+        m = moves[im];
+        nf0 = flipMove[f0 * 18 + m];
+        nt0 = twistMove[t0 * 18 + m];
+        ns0 = sliceMove[s0 * 18 + m];
+        idx = nt0 * N_FLIP + nf0;
+        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nt0 * N_SLICE1 + ns0;
+        if (((pruneSliceTwist[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nf0 * N_SLICE1 + ns0;
+        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        m1 = axisMove1[m];
+        nf1 = flipMove[f1 * 18 + m1];
+        nt1 = twistMove[t1 * 18 + m1];
+        ns1 = sliceMove[s1 * 18 + m1];
+        idx = nt1 * N_FLIP + nf1;
+        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nt1 * N_SLICE1 + ns1;
+        if (((pruneSliceTwist[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nf1 * N_SLICE1 + ns1;
+        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        m2 = axisMove2[m];
+        nf2 = flipMove[f2 * 18 + m2];
+        nt2 = twistMove[t2 * 18 + m2];
+        ns2 = sliceMove[s2 * 18 + m2];
+        idx = nt2 * N_FLIP + nf2;
+        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nt2 * N_SLICE1 + ns2;
+        if (((pruneSliceTwist[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nf2 * N_SLICE1 + ns2;
+        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        moveStack[depth] = m;
+        if (search1(
+          nf0, nt0, ns0, nf1, nt1, ns1, nf2, nt2, ns2,
+          FRtoBRMove[FRtoBR * 18 + m],
+          m % 3 === 1 ? parity : parity ^ 1,
+          URFtoDLFMove[URFtoDLF * 18 + m],
+          URtoULMove[URtoUL * 18 + m],
+          UBtoDFMove[UBtoDF * 18 + m],
+          m, rem, depth + 1
+        )) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    return {
+      lowerBound: lowerBound,
+      moveNames: moveNames,
+      moveStack: moveStack,
+      searchStarted: searchStarted,
+      getNodes: function() { return nodes; },
+      // Search a single total depth. `prefix` fixes the first plies (used to hand
+      // disjoint subtrees to different workers); pass null for the whole tree.
+      run: function(depth, prefix, ub) {
+        totalDepth = depth;
+        upperBound = ub == null ? depth : ub;
+        solutionLength = -1;
+        if (prefix && prefix.length) {
+          prefixLen = prefix.length;
+          prefixMoves = [];
+          for (var i = 0; i < prefix.length; i++) {
+            prefixMoves.push([prefix[i]]);
+          }
+        } else {
+          prefixLen = 0;
+          prefixMoves = null;
+        }
+        var found = search1(
+          rootFlip[0], rootTwist[0], rootSlice[0],
+          rootFlip[1], rootTwist[1], rootSlice[1],
+          rootFlip[2], rootTwist[2], rootSlice[2],
+          rootFRtoBR, rootParity, rootURFtoDLF, rootURtoUL, rootUBtoDF,
+          -1, depth, 0
+        );
+        return { found: found, solutionLength: solutionLength, nodes: nodes };
+      }
+    };
+  };
+
+  Cube.buildOptimalSearcher = buildOptimalSearcher;
+
+  // Remap a solution found on the upright cube back into the original scanned
+  // orientation. Mirrors the token remapping in solveOptimal below.
+  Cube.remapSolution = function(algorithm, rotation) {
+    var faceNumsLocal = { U: 0, R: 1, F: 2, D: 3, L: 4, B: 5 };
+    var faceNamesLocal = { 0: 'U', 1: 'R', 2: 'F', 3: 'D', 4: 'L', 5: 'B' };
+    var ref = algorithm.trim() ? algorithm.trim().split(/\s+/) : [];
+    var out = [];
+    for (var m = 0; m < ref.length; m++) {
+      var move = ref[m];
+      var mapped = faceNamesLocal[rotation[faceNumsLocal[move[0]]]];
+      if (move.length > 1) {
+        mapped += move[1];
+      }
+      out.push(mapped);
+    }
+    return out.join(' ');
+  };
+
+  // Establish the shared, one-time inputs for a parallel optimal search: the
+  // upright cube every worker searches, the rotation to map solutions back, a
+  // quick two-phase upper bound, the admissible lower bound, and the last depth
+  // that must be proven solution-free. Cheap; run once per solve.
+  Cube.prototype.optimalPrepare = function(maxDepth) {
+    maxDepth = maxDepth == null ? 20 : maxDepth;
+    var clone = this.clone();
+    var upright = clone.upright();
+    clone.move(upright);
+    var rotation = new Cube().move(upright).center;
+    if (clone.isSolved()) {
+      return { solved: true, rotation: rotation, upright: clone.toJSON(), quickLength: 0, quickAlgorithm: '', lowerBound: 0, lastDepth: 0 };
+    }
+    var quick = clone.solveUpright(Math.max(24, maxDepth));
+    if (quick == null) {
+      throw new Error('Could not establish an initial solution bound.');
+    }
+    var quickLength = quick.trim() ? quick.trim().split(/\s+/).length : 0;
+    var searcher = buildOptimalSearcher(clone, 500000, null);
+    var lowerBound = searcher.lowerBound;
+    var lastDepth = quickLength <= maxDepth ? quickLength - 1 : maxDepth;
+    return {
+      solved: false,
+      rotation: rotation,
+      upright: clone.toJSON(),
+      quickLength: quickLength,
+      quickAlgorithm: Cube.remapSolution(quick, rotation),
+      lowerBound: lowerBound,
+      lastDepth: lastDepth
+    };
+  };
+
   faceNums = {
     U: 0,
     R: 1,

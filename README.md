@@ -1,8 +1,10 @@
-# CubeScan PWA
+# TWENTY
 
-An installable, offline-capable 3×3 Rubik's Cube scanner and solver. It uses the phone camera to sample nine sticker colors per face, balances the color assignment to exactly nine stickers per color, validates whether the state is physically possible, and generates a provably shortest move-by-move solution in a Web Worker.
+An installable, offline-capable app built around a **provably-optimal** 3×3 Rubik's Cube algorithm that runs entirely on-device. It uses the phone camera to sample nine sticker colors per face, balances the color assignment to exactly nine stickers per color, validates whether the state is physically possible, and then proves the shortest possible solution in the half-turn metric — not just *a* solution, but a guarantee that no shorter one exists (God's Number is 20).
 
-The solution is played back on an interactive 3D cube built with pure CSS transforms (no libraries, so it still works offline). It renders your actual scanned sticker colors, animates each turn as you step through the moves, and you can drag it to rotate the view.
+The exhaustive proof search is parallelized across a pool of Web Workers (one per core), with a live telemetry readout showing the proof-depth frontier, positions checked, search rate, and cores engaged.
+
+The solution is played back on an interactive 3D cube built with pure CSS transforms (no libraries, so it still works offline). It renders your actual scanned sticker colors, animates each turn as you step through the moves, and you can drag it to rotate the view — or flip on the opt-in AR overlay to float the cube over your live camera feed.
 
 ## Run it locally
 

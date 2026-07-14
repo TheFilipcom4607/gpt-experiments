@@ -232,11 +232,29 @@ h2 { letter-spacing: -.025em; }
 .optimal-note { margin: 18px 0 12px; padding: 14px; border-radius: 15px; display: grid; gap: 5px; background: rgba(20,184,166,.08); border: 1px solid rgba(20,184,166,.24); }
 .optimal-note strong { color: var(--accent-soft); font-size: .9rem; }
 .optimal-note span { color: var(--muted); font-size: .8rem; line-height: 1.45; }
-.solve-progress { margin: 0 0 12px; padding: 14px; border-radius: 15px; display: grid; grid-template-columns: 28px 1fr; align-items: center; gap: 12px; background: rgba(255,203,104,.07); border: 1px solid rgba(255,203,104,.22); }
+.solve-progress { margin: 0 0 12px; padding: 16px; border-radius: 15px; display: grid; gap: 13px; background: rgba(255,203,104,.07); border: 1px solid rgba(255,203,104,.22); }
+.solve-progress-head { display: grid; grid-template-columns: 28px 1fr; align-items: center; gap: 12px; }
 .solve-progress strong { display: block; color: #ffe0a0; font-size: .88rem; }
 .solve-progress span { display: block; margin-top: 3px; color: var(--muted); font-size: .78rem; line-height: 1.4; }
-.progress-track { grid-column: 1 / -1; height: 6px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.09); }
+.progress-track { height: 6px; border-radius: 999px; overflow: hidden; background: rgba(255,255,255,.09); }
 .progress-track div { height: 100%; width: 0%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .4s ease; }
+
+/* Nerdy proof-depth ladder: no-solution-≤ · searching · best-known · God's Number */
+.proof-ladder { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+.ladder-cell { display: grid; gap: 2px; justify-items: center; padding: 8px 12px; min-width: 60px; border-radius: 11px; background: rgba(255,255,255,.04); border: 1px solid var(--line); }
+.ladder-cell em { font-style: normal; font-weight: 800; font-size: 1.15rem; color: #eaf1f6; }
+.ladder-cell small { font-size: .56rem; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.ladder-cell.active { background: rgba(20,184,166,.16); border-color: rgba(20,184,166,.5); }
+.ladder-cell.active em { color: var(--accent-soft); }
+.ladder-cell.god { margin-left: auto; background: rgba(255,203,104,.1); border-color: rgba(255,203,104,.3); }
+.ladder-cell.god em { color: var(--warn); }
+.ladder-arrow { align-self: center; color: var(--muted); font-weight: 800; }
+
+/* Live search telemetry grid */
+.proof-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 8px; }
+.proof-stats .stat { display: grid; gap: 2px; padding: 8px 10px; border-radius: 11px; background: rgba(255,255,255,.03); border: 1px solid var(--line); }
+.proof-stats .stat em { font-style: normal; font-weight: 800; font-size: 1rem; color: #eaf1f6; font-variant-numeric: tabular-nums; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+.proof-stats .stat small { font-size: .56rem; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
 .progress-spinner { width: 24px; height: 24px; border-radius: 50%; border: 3px solid rgba(255,255,255,.15); border-top-color: var(--warn); animation: solver-spin .8s linear infinite; }
 @keyframes solver-spin { to { transform: rotate(360deg); } }
 .solve-summary { display: grid; justify-items: end; gap: 7px; }
@@ -274,6 +292,30 @@ h2 { letter-spacing: -.025em; }
 .check-orbit { width: 110px; height: 110px; margin: 0 auto 24px; border-radius: 50%; border: 2px solid rgba(85,216,154,.3); display: grid; place-items: center; box-shadow: 0 0 0 14px rgba(85,216,154,.06), 0 0 0 28px rgba(85,216,154,.025); }
 .check-orbit span { display: grid; place-items: center; width: 72px; height: 72px; border-radius: 50%; background: var(--good); color: #07140d; font-size: 2.2rem; font-weight: 900; }
 .solved-message p { color: var(--muted); }
+
+/* End-of-playback celebration overlay */
+.check-orbit.big { width: 132px; height: 132px; margin-bottom: 18px; }
+.check-orbit.big span { width: 88px; height: 88px; font-size: 2.7rem; }
+.solve-complete { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 24px; background: rgba(5,8,12,.72); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); opacity: 0; pointer-events: none; transition: opacity .26s ease; }
+.solve-complete.show { opacity: 1; pointer-events: auto; }
+.solve-complete-card { position: relative; overflow: hidden; max-width: 440px; width: 100%; text-align: center; padding: 44px 28px calc(28px + var(--safe-bottom)); border-radius: 26px; background: linear-gradient(160deg, rgba(20,184,166,.16), rgba(14,154,210,.05)), #0f151c; border: 1px solid rgba(85,216,154,.3); box-shadow: 0 30px 80px rgba(0,0,0,.55); transform: translateY(16px) scale(.98); transition: transform .3s cubic-bezier(.2,.8,.25,1); }
+.solve-complete.show .solve-complete-card { transform: translateY(0) scale(1); }
+.solve-complete-card h2 { font-size: clamp(2rem,7vw,3rem); margin: 6px 0 10px; }
+.solve-complete-card p:not(.eyebrow) { color: var(--muted); line-height: 1.5; }
+.solve-complete-actions { display: flex; gap: 10px; margin-top: 24px; }
+.solve-complete-actions .button { flex: 1; }
+.confetti { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.confetti i { position: absolute; top: -14px; width: 8px; height: 13px; border-radius: 2px; opacity: 0; animation: confetti-fall 1.1s ease-in forwards; }
+@keyframes confetti-fall { 0% { transform: translateY(-14px) rotate(0); opacity: 0; } 12% { opacity: 1; } 100% { transform: translateY(420px) rotate(560deg); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .confetti { display: none; } .solve-complete, .solve-complete-card { transition: none; } }
+
+/* Opt-in AR overlay: live rear camera behind the transparent CSS cube */
+.ar-camera { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; z-index: 0; }
+.move-visual-card.ar-active { background: #05070c; }
+.move-visual-card.ar-active .cube-viewport { z-index: 1; }
+.move-visual-card.ar-active .facelet { opacity: .62; }
+.move-visual-card.ar-active .cubie-core { opacity: .22; }
+.visual-toolbar .button.active { background: var(--accent); color: #fff; }
 
 .toast { position: fixed; z-index: 60; left: 50%; bottom: calc(24px + var(--safe-bottom)); transform: translate(-50%,20px); max-width: min(92vw,540px); padding: 12px 16px; border-radius: 14px; background: #f6f7fb; color: #101522; font-weight: 700; box-shadow: 0 15px 50px rgba(0,0,0,.4); opacity: 0; pointer-events: none; transition: .25s ease; text-align: center; }
 .toast.show { opacity: 1; transform: translate(-50%,0); }

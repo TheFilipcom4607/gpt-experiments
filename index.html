@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <meta name="theme-color" content="#0a0f14">
-  <meta name="description" content="Scan a 3×3 Rubik's Cube with your camera and get a provably shortest solution.">
+  <meta name="description" content="TWENTY runs a provably-optimal Rubik's Cube algorithm on your device. Scan any 3×3 and watch it crack the shortest solution that exists — God's Number is 20.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="CubeScan">
+  <meta name="apple-mobile-web-app-title" content="TWENTY">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <link rel="icon" href="icons/icon-192.png">
   <link rel="stylesheet" href="styles.css">
-  <title>CubeScan</title>
+  <title>TWENTY · optimal cube algorithm</title>
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -20,11 +20,11 @@
       <button id="homeButton" class="icon-button hidden" type="button" aria-label="Go home">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
       </button>
-      <a class="brand" href="#home" aria-label="CubeScan home">
+      <a class="brand" href="#home" aria-label="TWENTY home">
         <span class="brand-mark" aria-hidden="true">
           <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
         </span>
-        <span>CubeScan</span>
+        <span>TWENTY</span>
       </a>
       <button id="installButton" class="install-button" type="button">Install</button>
     </header>
@@ -33,9 +33,9 @@
       <section id="homeView" class="view active" aria-labelledby="homeTitle">
         <div class="hero">
           <div class="hero-copy">
-            <p class="eyebrow">Camera-powered 3×3 solver</p>
-            <h1 id="homeTitle">Point. Scan. Solve.</h1>
-            <p class="hero-text">Capture all six faces, correct any uncertain stickers, then let the app prove the shortest possible solution and guide you through it. Everything runs locally in your browser.</p>
+            <p class="eyebrow">On-device optimal algorithm</p>
+            <h1 id="homeTitle">The shortest solution. Proven.</h1>
+            <p class="hero-text">TWENTY isn't a normal cube app. Scan your 3×3 and it runs an exhaustive, provably-optimal search right on your device — it doesn't just solve the cube, it proves that <em>no shorter</em> solution exists. Every scramble is at most 20 moves from solved; watch the algorithm find the exact minimum, live.</p>
             <div class="hero-actions">
               <button id="startButton" class="button primary large" type="button">Scan my cube</button>
               <button id="resumeButton" class="button secondary large hidden" type="button">Resume scan</button>
@@ -153,12 +153,29 @@
               <span>A 180° turn counts as one move, so every legal state is at most 20 moves away. Proving the exact minimum can still take much longer than an ordinary solver, especially on deeply scrambled cubes.</span>
             </div>
             <div id="solveProgress" class="solve-progress hidden" role="status" aria-live="polite">
-              <div class="progress-spinner" aria-hidden="true"></div>
-              <div>
-                <strong id="solveProgressTitle">Preparing optimal search…</strong>
-                <span id="solveProgressDetail">Finding an initial upper bound.</span>
+              <div class="solve-progress-head">
+                <div class="progress-spinner" aria-hidden="true"></div>
+                <div>
+                  <strong id="solveProgressTitle">Preparing optimal search…</strong>
+                  <span id="solveProgressDetail">Spinning up the on-device search engine.</span>
+                </div>
+              </div>
+              <div id="proofLadder" class="proof-ladder" aria-hidden="true">
+                <span class="ladder-cell"><em id="ladderProven">–</em><small>no solution ≤</small></span>
+                <span class="ladder-arrow">›</span>
+                <span class="ladder-cell active"><em id="ladderDepth">–</em><small>searching</small></span>
+                <span class="ladder-arrow">›</span>
+                <span class="ladder-cell"><em id="ladderBound">–</em><small>best known</small></span>
+                <span class="ladder-cell god"><em>20</em><small>God's Number</small></span>
               </div>
               <div class="progress-track" aria-hidden="true"><div id="solveProgressBar"></div></div>
+              <div id="proofStats" class="proof-stats" aria-hidden="true">
+                <div class="stat"><em id="statNodes">0</em><small>positions checked</small></div>
+                <div class="stat"><em id="statRate">0</em><small>positions / sec</small></div>
+                <div class="stat"><em id="statCores">1</em><small>cores engaged</small></div>
+                <div class="stat"><em id="statJobs">0 / 0</em><small>branches this depth</small></div>
+                <div class="stat"><em id="statElapsed">0s</em><small>elapsed</small></div>
+              </div>
             </div>
             <button id="solveButton" class="button primary large full" type="button">Find shortest solution</button>
             <button id="cancelSolveButton" class="button secondary full hidden" type="button">Cancel optimal search</button>
@@ -189,10 +206,12 @@
         <div id="solutionPlayer" class="solution-player hidden">
           <div class="move-visual-card">
             <div id="cubeViewport" class="cube-viewport" aria-label="3D cube preview of the current move">
+              <video id="arCamera" class="ar-camera hidden" autoplay muted playsinline></video>
               <div id="cube3d" class="cube3d" aria-hidden="true"></div>
             </div>
             <div class="visual-toolbar">
               <button id="replayMoveButton" class="button secondary small" type="button">Replay turn</button>
+              <button id="arToggleButton" class="button secondary small" type="button" aria-pressed="false">AR view</button>
               <span class="drag-hint">Drag the cube to rotate the view</span>
             </div>
           </div>
@@ -215,6 +234,20 @@
         <button id="newScanButton" class="button secondary" type="button">Scan another cube</button>
       </section>
     </main>
+
+    <div id="solveComplete" class="solve-complete hidden" role="dialog" aria-modal="true" aria-labelledby="solveCompleteTitle">
+      <div class="solve-complete-card">
+        <div class="confetti" aria-hidden="true"></div>
+        <div class="check-orbit big"><span>✓</span></div>
+        <p class="eyebrow">Provably optimal</p>
+        <h2 id="solveCompleteTitle">Solved.</h2>
+        <p id="solveCompleteSummary">Every move done — your cube is solved in the fewest turns physically possible.</p>
+        <div class="solve-complete-actions">
+          <button id="solveCompleteReplay" class="button secondary" type="button">Replay from start</button>
+          <button id="solveCompleteScan" class="button primary" type="button">Crack another cube</button>
+        </div>
+      </div>
+    </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
   </div>

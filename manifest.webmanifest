@@ -1,7 +1,7 @@
 {
-  "name": "CubeScan – Rubik's Cube Solver",
-  "short_name": "CubeScan",
-  "description": "Scan a 3×3 Rubik's Cube with your camera and get a provably shortest step-by-step solution.",
+  "name": "TWENTY – provably-optimal cube algorithm",
+  "short_name": "TWENTY",
+  "description": "Scan any 3×3 Rubik's Cube and watch a provably-optimal algorithm crack the shortest solution that exists, entirely on your device. God's Number is 20.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cubescan-v5-3d-cube';
+const CACHE_NAME = 'twenty-v6-parallel';
 const APP_SHELL = [
   './',
   './index.html',
