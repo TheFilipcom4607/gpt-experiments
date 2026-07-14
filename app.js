@@ -68,7 +68,7 @@ function cacheDom() {
     'orientationText', 'faceBadge', 'cameraStage', 'camera', 'captureCanvas', 'scanGrid',
     'cameraMessage', 'torchButton', 'backFaceButton', 'captureButton', 'skipToReviewButton',
     'cubeNet', 'selectedStickerText', 'colorPalette', 'colorCounts', 'validationBox',
-    'solveProgress', 'solveProgressTitle', 'solveProgressDetail', 'solveButton',
+    'solveProgress', 'solveProgressTitle', 'solveProgressDetail', 'solveProgressBar', 'solveButton',
     'cancelSolveButton', 'rescanButton', 'clearButton', 'moveCounter', 'optimalProof', 'solvedMessage',
     'solutionPlayer', 'moveNet', 'turnArrow', 'doubleBadge', 'movePosition', 'moveNotation',
     'moveInstruction', 'previousMoveButton', 'nextMoveButton', 'algorithmText',
@@ -97,6 +97,11 @@ function bindEvents() {
   dom.nextMoveButton.addEventListener('click', nextSolutionStep);
   dom.newScanButton.addEventListener('click', clearScan);
   window.addEventListener('resize', positionCameraShades);
+  document.addEventListener('keydown', (event) => {
+    if (!dom.solveView.classList.contains('active') || !state.solution.length) return;
+    if (event.key === 'ArrowRight') { event.preventDefault(); nextSolutionStep(); }
+    else if (event.key === 'ArrowLeft') { event.preventDefault(); setSolutionStep(state.solutionIndex - 1); }
+  });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && dom.scanView.classList.contains('active')) stopCamera();
     if (!document.hidden && state.solving) acquireWakeLock();
@@ -761,14 +766,23 @@ function updateSolveProgress(progress = {}) {
   if (progress.stage === 'upper-bound') {
     dom.solveProgressTitle.textContent = 'Finding an upper bound…';
     dom.solveProgressDetail.textContent = 'First finding a short solution, then proving whether anything shorter exists.';
+    dom.solveProgressBar.style.width = '4%';
     return;
   }
 
   if (progress.stage === 'proof-search') {
-    dom.solveProgressTitle.textContent = `Proving depth ${progress.depth}…`;
-    const nodes = Number.isFinite(progress.nodes) ? formatInteger(progress.nodes) : '0';
-    const candidate = Number.isFinite(progress.upperBound) ? ` Fast candidate: ${progress.upperBound} moves.` : '';
-    dom.solveProgressDetail.textContent = `${nodes} search nodes checked.${candidate} Keep this page open.`;
+    dom.solveProgressTitle.textContent = `Proving depth ${progress.depth} of at most ${progress.upperBound}…`;
+    const parts = [];
+    if (Number.isFinite(progress.nodes)) {
+      parts.push(`${formatInteger(progress.nodes)} positions checked`);
+      if (progress.elapsedMs > 1500) parts.push(`${formatInteger(progress.nodes / (progress.elapsedMs / 1000))}/s`);
+    }
+    parts.push('Keep this page open.');
+    dom.solveProgressDetail.textContent = parts.join(' · ');
+    if (Number.isFinite(progress.depth) && Number.isFinite(progress.upperBound) && progress.upperBound > 0) {
+      const percent = Math.max(4, Math.min(96, Math.round((progress.depth / progress.upperBound) * 100)));
+      dom.solveProgressBar.style.width = `${percent}%`;
+    }
   }
 }
 

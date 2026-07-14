@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cubescan-v3-color-prompts';
+const CACHE_NAME = 'cubescan-v4-fast-solver';
 const APP_SHELL = [
   './',
   './index.html',

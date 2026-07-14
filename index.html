@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-  <meta name="theme-color" content="#0b1020">
+  <meta name="theme-color" content="#0a0f14">
   <meta name="description" content="Scan a 3×3 Rubik's Cube with your camera and get a provably shortest solution.">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -158,6 +158,7 @@
                 <strong id="solveProgressTitle">Preparing optimal search…</strong>
                 <span id="solveProgressDetail">Finding an initial upper bound.</span>
               </div>
+              <div class="progress-track" aria-hidden="true"><div id="solveProgressBar"></div></div>
             </div>
             <button id="solveButton" class="button primary large full" type="button">Find shortest solution</button>
             <button id="cancelSolveButton" class="button secondary full hidden" type="button">Cancel optimal search</button>
@@ -205,7 +206,7 @@
           </div>
         </div>
 
-        <details class="algorithm-card">
+        <details class="algorithm-card" open>
           <summary>Full algorithm</summary>
           <div id="algorithmText" class="algorithm-text"></div>
         </details>

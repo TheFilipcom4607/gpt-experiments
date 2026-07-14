@@ -38,6 +38,8 @@ The app returns an **optimal solution in the half-turn metric (HTM)**: `R`, `R'`
 
 The solver first uses the included `cubejs` 1.3.2 two-phase implementation to obtain a short upper bound. It then performs an exact increasing-depth search. Every shorter canonical move sequence is ruled out before a result is shown, so the displayed algorithm is not merely short—it is minimal in HTM.
 
-Exact optimal search is dramatically more expensive than ordinary two-phase solving. Easy and moderately scrambled positions may finish quickly, while deep random positions can require a very large search and may take minutes, hours, or longer on a phone. Keep the page open. The **Cancel optimal search** button terminates the worker safely and rebuilds it for another attempt.
+The exact search stores all move and pruning tables in flat typed arrays, prunes with three admissible bounds (slice+flip, slice+twist, and twist+flip) evaluated in three conjugate coordinate systems, and runs on plain integer coordinates without allocating during the search. Positions up to about 13 optimal moves are typically proven in around a second on a desktop, and 14–15 within seconds to a few minutes.
+
+Exact optimal search is still dramatically more expensive than ordinary two-phase solving. Deeply scrambled random positions (16+ optimal moves) can require a very large search and may take a long time on a phone. Keep the page open. The **Cancel optimal search** button terminates the worker safely and rebuilds it for another attempt.
 
 Everything still runs locally and offline. No cube state is sent to a server. The `cubejs` license is included in `THIRD_PARTY_LICENSES.md`.

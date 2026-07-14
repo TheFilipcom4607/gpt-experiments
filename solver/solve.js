@@ -279,29 +279,30 @@
     Cube.prototype[key] = value;
   }
 
+  // Move tables are flat Int32Arrays with a stride of 18: the entry for
+  // coordinate i after move m lives at index i * 18 + m. Flat typed arrays
+  // keep the hot search loops free of nested array dereferences.
   computeMoveTable = function(context, coord, size) {
-    var apply, cube, i, inner, j, k, m, move, o, p, ref, results;
+    var apply, cube, i, j, k, move, table;
     // Loop through all valid values for the coordinate, setting cube's
     // state in each iteration. Then apply each of the 18 moves to the
     // cube, and compute the resulting coordinate.
     apply = context === 'corners' ? 'cornerMultiply' : 'edgeMultiply';
     cube = new Cube;
-    results = [];
-    for (i = m = 0, ref = size - 1; (0 <= ref ? m <= ref : m >= ref); i = 0 <= ref ? ++m : --m) {
+    table = new Int32Array(size * 18);
+    for (i = 0; i < size; i++) {
       cube[coord](i);
-      inner = [];
-      for (j = o = 0; o <= 5; j = ++o) {
+      for (j = 0; j <= 5; j++) {
         move = Cube.moves[j];
-        for (k = p = 0; p <= 2; k = ++p) {
+        for (k = 0; k <= 2; k++) {
           cube[apply](move);
-          inner.push(cube[coord]());
+          table[i * 18 + j * 3 + k] = cube[coord]();
         }
         // 4th face turn restores the cube
         cube[apply](move);
       }
-      results.push(inner);
     }
-    return results;
+    return table;
   };
 
   // Because we only have the phase 2 URtoDF coordinates, we need to
@@ -355,7 +356,7 @@
   
   // The move table for parity is so small that it's included here
   Cube.moveTables = {
-    parity: [[1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1], [0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]],
+    parity: Int32Array.from([1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]),
     twist: null,
     flip: null,
     FRtoBR: null,
@@ -363,7 +364,10 @@
     URtoDF: null,
     URtoUL: null,
     UBtoDF: null,
-    mergeURtoDF: null
+    mergeURtoDF: null,
+    // The slice coordinate (FRtoBR / 24) gets its own table so the search
+    // does not have to expand it through FRtoBR on every node.
+    slice: null
   };
 
   // Other move tables are computed on the fly
@@ -399,23 +403,32 @@
       }
       if (tableName === 'mergeURtoDF') {
         this.moveTables.mergeURtoDF = (function() {
-          var UBtoDF, URtoUL, o, results;
-          results = [];
-          for (URtoUL = o = 0; o <= 335; URtoUL = ++o) {
-            results.push((function() {
-              var p, results1;
-              results1 = [];
-              for (UBtoDF = p = 0; p <= 335; UBtoDF = ++p) {
-                results1.push(mergeURtoDF(URtoUL, UBtoDF));
-              }
-              return results1;
-            })());
+          var UBtoDF, URtoUL, merged;
+          // Flat with a stride of 336: merged coordinate for the pair
+          // (URtoUL, UBtoDF) lives at URtoUL * 336 + UBtoDF.
+          merged = new Int32Array(336 * 336);
+          for (URtoUL = 0; URtoUL <= 335; URtoUL++) {
+            for (UBtoDF = 0; UBtoDF <= 335; UBtoDF++) {
+              merged[URtoUL * 336 + UBtoDF] = mergeURtoDF(URtoUL, UBtoDF);
+            }
           }
-          return results;
+          return merged;
         })();
       } else {
         [scope, size] = moveTableParams[tableName];
         this.moveTables[tableName] = computeMoveTable(scope, tableName, size);
+        if (tableName === 'FRtoBR') {
+          this.moveTables.slice = (function(FRtoBR) {
+            var move, slice, table;
+            table = new Int32Array(N_SLICE1 * 18);
+            for (slice = 0; slice < N_SLICE1; slice++) {
+              for (move = 0; move < 18; move++) {
+                table[slice * 18 + move] = FRtoBR[slice * N_SLICE2 * 18 + move] / N_SLICE2 | 0;
+              }
+            }
+            return table;
+          })(this.moveTables.FRtoBR);
+        }
       }
     }
     return this;
@@ -471,34 +484,26 @@
     return results;
   })();
 
-  // 8 values are encoded in one number
+  // 8 values are encoded in one 32-bit slot, 4 bits each
   pruning = function(table, index, value) {
-    var pos, shift, slot;
-    pos = index % 8;
+    var shift, slot;
     slot = index >> 3;
-    shift = pos << 2;
+    shift = (index & 7) << 2;
     if (value != null) {
       // Set
-      table[slot] &= ~(0xF << shift);
-      table[slot] |= value << shift;
+      table[slot] = (table[slot] & ~(0xF << shift)) | (value << shift);
       return value;
     } else {
       // Get
-      return (table[slot] & (0xF << shift)) >>> shift;
+      return (table[slot] >>> shift) & 0xF;
     }
   };
 
-  computePruningTable = function(phase, size, currentCoords, nextIndex) {
-    var current, depth, done, index, len, m, move, moves, next, o, ref, table, x;
+  computePruningTable = function(phase, size, nextIndex) {
+    var depth, done, i, index, len, m, move, moves, next, table;
     // Initialize all values to 0xF
-    table = (function() {
-      var m, ref, results;
-      results = [];
-      for (x = m = 0, ref = Math.ceil(size / 8) - 1; (0 <= ref ? m <= ref : m >= ref); x = 0 <= ref ? ++m : --m) {
-        results.push(0xFFFFFFFF);
-      }
-      return results;
-    })();
+    table = new Int32Array(Math.ceil(size / 8));
+    table.fill(-1);
     if (phase === 1) {
       moves = allMoves1;
     } else {
@@ -511,16 +516,16 @@
     // compute the next state. Stop when all states have been assigned a
     // depth.
     while (done !== size) {
-      for (index = m = 0, ref = size - 1; (0 <= ref ? m <= ref : m >= ref); index = 0 <= ref ? ++m : --m) {
-        if (!(pruning(table, index) === depth)) {
+      for (index = 0; index < size; index++) {
+        if (((table[index >> 3] >>> ((index & 7) << 2)) & 0xF) !== depth) {
           continue;
         }
-        current = currentCoords(index);
-        for (o = 0, len = moves.length; o < len; o++) {
-          move = moves[o];
-          next = nextIndex(current, move);
-          if (pruning(table, next) === 0xF) {
-            pruning(table, next, depth + 1);
+        for (i = 0, len = moves.length; i < len; i++) {
+          move = moves[i];
+          next = nextIndex(index, move);
+          if (((table[next >> 3] >>> ((next & 7) << 2)) & 0xF) === 0xF) {
+            m = next >> 3;
+            table[m] = (table[m] & ~(0xF << ((next & 7) << 2))) | ((depth + 1) << ((next & 7) << 2));
             done++;
           }
         }
@@ -533,100 +538,69 @@
   Cube.pruningTables = {
     sliceTwist: null,
     sliceFlip: null,
+    twistFlip: null,
     sliceURFtoDLFParity: null,
     sliceURtoDFParity: null
   };
 
   pruningTableParams = {
-    // name: [phase, size, currentCoords, nextIndex]
+    // name: [phase, size, nextIndex]
     sliceTwist: [
       1,
       N_SLICE1 * N_TWIST,
-      function(index) {
-        return [index % N_SLICE1,
-      index / N_SLICE1 | 0];
-      },
-      function(current,
-      move) {
-        var newSlice,
-      newTwist,
-      slice,
-      twist;
-        [slice,
-      twist] = current;
-        newSlice = Cube.moveTables.FRtoBR[slice * 24][move] / 24 | 0;
-        newTwist = Cube.moveTables.twist[twist][move];
-        return newTwist * N_SLICE1 + newSlice;
+      function(index, move) {
+        var slice, twist;
+        slice = index % N_SLICE1;
+        twist = index / N_SLICE1 | 0;
+        return Cube.moveTables.twist[twist * 18 + move] * N_SLICE1 + Cube.moveTables.slice[slice * 18 + move];
       }
     ],
     sliceFlip: [
       1,
       N_SLICE1 * N_FLIP,
-      function(index) {
-        return [index % N_SLICE1,
-      index / N_SLICE1 | 0];
-      },
-      function(current,
-      move) {
-        var flip,
-      newFlip,
-      newSlice,
-      slice;
-        [slice,
-      flip] = current;
-        newSlice = Cube.moveTables.FRtoBR[slice * 24][move] / 24 | 0;
-        newFlip = Cube.moveTables.flip[flip][move];
-        return newFlip * N_SLICE1 + newSlice;
+      function(index, move) {
+        var flip, slice;
+        slice = index % N_SLICE1;
+        flip = index / N_SLICE1 | 0;
+        return Cube.moveTables.flip[flip * 18 + move] * N_SLICE1 + Cube.moveTables.slice[slice * 18 + move];
+      }
+    ],
+    // Distance to solving both orientation coordinates at once. This is a
+    // third admissible phase-1 bound; combined with the two slice tables it
+    // prunes the exact optimal search considerably harder than either
+    // orientation bound alone.
+    twistFlip: [
+      1,
+      N_TWIST * N_FLIP,
+      function(index, move) {
+        var flip, twist;
+        flip = index % N_FLIP;
+        twist = index / N_FLIP | 0;
+        return Cube.moveTables.twist[twist * 18 + move] * N_FLIP + Cube.moveTables.flip[flip * 18 + move];
       }
     ],
     sliceURFtoDLFParity: [
       2,
       N_SLICE2 * N_URFtoDLF * N_PARITY,
-      function(index) {
-        return [index % 2,
-      (index / 2 | 0) % N_SLICE2,
-      (index / 2 | 0) / N_SLICE2 | 0];
-      },
-      function(current,
-      move) {
-        var URFtoDLF,
-      newParity,
-      newSlice,
-      newURFtoDLF,
-      parity,
-      slice;
-        [parity,
-      slice,
-      URFtoDLF] = current;
-        newParity = Cube.moveTables.parity[parity][move];
-        newSlice = Cube.moveTables.FRtoBR[slice][move];
-        newURFtoDLF = Cube.moveTables.URFtoDLF[URFtoDLF][move];
-        return (newURFtoDLF * N_SLICE2 + newSlice) * 2 + newParity;
+      function(index, move) {
+        var URFtoDLF, newParity, parity, slice;
+        parity = index & 1;
+        slice = (index >>> 1) % N_SLICE2;
+        URFtoDLF = (index >>> 1) / N_SLICE2 | 0;
+        newParity = move % 3 === 1 ? parity : parity ^ 1;
+        return (Cube.moveTables.URFtoDLF[URFtoDLF * 18 + move] * N_SLICE2 + Cube.moveTables.FRtoBR[slice * 18 + move]) * 2 + newParity;
       }
     ],
     sliceURtoDFParity: [
       2,
       N_SLICE2 * N_URtoDF * N_PARITY,
-      function(index) {
-        return [index % 2,
-      (index / 2 | 0) % N_SLICE2,
-      (index / 2 | 0) / N_SLICE2 | 0];
-      },
-      function(current,
-      move) {
-        var URtoDF,
-      newParity,
-      newSlice,
-      newURtoDF,
-      parity,
-      slice;
-        [parity,
-      slice,
-      URtoDF] = current;
-        newParity = Cube.moveTables.parity[parity][move];
-        newSlice = Cube.moveTables.FRtoBR[slice][move];
-        newURtoDF = Cube.moveTables.URtoDF[URtoDF][move];
-        return (newURtoDF * N_SLICE2 + newSlice) * 2 + newParity;
+      function(index, move) {
+        var URtoDF, newParity, parity, slice;
+        parity = index & 1;
+        slice = (index >>> 1) % N_SLICE2;
+        URtoDF = (index >>> 1) / N_SLICE2 | 0;
+        newParity = move % 3 === 1 ? parity : parity ^ 1;
+        return (Cube.moveTables.URtoDF[URtoDF * 18 + move] * N_SLICE2 + Cube.moveTables.FRtoBR[slice * 18 + move]) * 2 + newParity;
       }
     ]
   };
@@ -710,7 +684,7 @@
 
       //# Helpers
       move(table, index, move) {
-        return Cube.moveTables[table][index][move];
+        return Cube.moveTables[table][index * 18 + move];
       }
 
       pruning(table, index) {
@@ -749,7 +723,7 @@
         next.depth = this.depth + 1;
         next.flip = this.move('flip', this.flip, move);
         next.twist = this.move('twist', this.twist, move);
-        next.slice = this.move('FRtoBR', this.slice * 24, move) / 24 | 0;
+        next.slice = this.move('slice', this.slice, move);
         return next;
       }
 
@@ -791,7 +765,7 @@
         if (top) {
           // This is the initial phase 2 state. Get the URtoDF coordinate
           // by merging URtoUL and UBtoDF
-          return this.URtoDF = this.move('mergeURtoDF', this.URtoUL, this.UBtoDF);
+          return this.URtoDF = Cube.moveTables.mergeURtoDF[this.URtoUL * 336 + this.UBtoDF];
         }
       }
 
@@ -922,9 +896,11 @@
   // depth. Because unrestricted phase-1 search continues as well, solutions
   // that leave and later re-enter the subgroup are not missed.
   Cube.prototype.solveOptimalUpright = function(options) {
-    var State, axisMoveMaps, conjugateCube, exactSearch, freeStates, lastDepth, lowerBound, maxDepth, moveNames,
-      nodes, onProgress, phase2, quickLength, quickSolution, reportEvery,
-      reportProgress, searchStarted, solution, state, totalDepth, x;
+    var FRtoBRMove, UBtoDFMove, URFtoDLFMove, URtoDFMove, URtoULMove, axisCubes, axisMove1, axisMove2,
+      conjugateCube, flipMove, i, isMove2, lastDepth, lowerBound, maxDepth, mergeTable, moveNames, moveStack,
+      nodes, onProgress, phase2Search, pruneSliceFlip, pruneSliceTwist, pruneTwistFlip, pruneP2URFtoDLF,
+      pruneP2URtoDF, quickLength, quickSolution, reportEvery, rootDist, rootFlip, rootTwist, rootSlice,
+      search1, searchStarted, sliceMove, solution, solutionLength, tokens, totalDepth, twistMove;
 
     options = options || {};
     maxDepth = options.maxDepth == null ? 20 : options.maxDepth;
@@ -947,19 +923,19 @@
     // Evaluate the phase-1 lower bound in three conjugate coordinate
     // systems (UD, FB and RL axes). Each is admissible in HTM, and taking
     // their maximum substantially reduces the exact search tree.
-    axisMoveMaps = [
-      [0, 1, 2, 3, 4, 5],
-      [5, 1, 0, 2, 4, 3], // conjugation by x
-      [1, 3, 2, 4, 0, 5]  // conjugation by z
-    ];
-    axisMoveMaps = axisMoveMaps.map(function(faceMap) {
-      var mapped, move;
-      mapped = [];
+    // axisMove1/axisMove2 translate a move into the x- and z-conjugated
+    // coordinate systems.
+    axisMove1 = new Int32Array(18);
+    axisMove2 = new Int32Array(18);
+    (function() {
+      var faceMap1, faceMap2, move;
+      faceMap1 = [5, 1, 0, 2, 4, 3]; // conjugation by x
+      faceMap2 = [1, 3, 2, 4, 0, 5]; // conjugation by z
       for (move = 0; move < 18; move++) {
-        mapped.push(faceMap[move / 3 | 0] * 3 + move % 3);
+        axisMove1[move] = faceMap1[move / 3 | 0] * 3 + move % 3;
+        axisMove2[move] = faceMap2[move / 3 | 0] * 3 + move % 3;
       }
-      return mapped;
-    });
+    })();
     conjugateCube = function(cube, rotation) {
       return new Cube().move(Cube.inverse(rotation)).multiply(cube).move(rotation);
     };
@@ -992,232 +968,199 @@
       };
     }
 
-    State = class State {
-      constructor(cube) {
-        this.parent = null;
-        this.lastMove = null;
-        this.depth = 0;
-        this.URtoDF = null;
-        this.axisFlip = [0, 0, 0];
-        this.axisTwist = [0, 0, 0];
-        this.axisSlice = [0, 0, 0];
-        if (cube) {
-          this.init(cube);
-        }
-      }
+    // Local aliases so the hot loops hit monomorphic typed arrays directly.
+    flipMove = Cube.moveTables.flip;
+    twistMove = Cube.moveTables.twist;
+    sliceMove = Cube.moveTables.slice;
+    FRtoBRMove = Cube.moveTables.FRtoBR;
+    URFtoDLFMove = Cube.moveTables.URFtoDLF;
+    URtoDFMove = Cube.moveTables.URtoDF;
+    URtoULMove = Cube.moveTables.URtoUL;
+    UBtoDFMove = Cube.moveTables.UBtoDF;
+    mergeTable = Cube.moveTables.mergeURtoDF;
+    pruneSliceFlip = Cube.pruningTables.sliceFlip;
+    pruneSliceTwist = Cube.pruningTables.sliceTwist;
+    pruneTwistFlip = Cube.pruningTables.twistFlip;
+    pruneP2URtoDF = Cube.pruningTables.sliceURtoDFParity;
+    pruneP2URFtoDLF = Cube.pruningTables.sliceURFtoDLFParity;
 
-      init(cube) {
-        this.parent = null;
-        this.lastMove = null;
-        this.depth = 0;
-        var axis, axisCubes;
-        axisCubes = [cube, conjugateCube(cube, 'x'), conjugateCube(cube, 'z')];
-        for (axis = 0; axis < 3; axis++) {
-          this.axisFlip[axis] = axisCubes[axis].flip();
-          this.axisTwist[axis] = axisCubes[axis].twist();
-          this.axisSlice[axis] = axisCubes[axis].FRtoBR() / N_SLICE2 | 0;
-        }
-        this.flip = this.axisFlip[0];
-        this.twist = this.axisTwist[0];
-        this.FRtoBR = cube.FRtoBR();
-        this.slice = this.axisSlice[0];
-        this.parity = cube.cornerParity();
-        this.URFtoDLF = cube.URFtoDLF();
-        this.URtoUL = cube.URtoUL();
-        this.UBtoDF = cube.UBtoDF();
-        this.URtoDF = null;
-        return this;
-      }
+    isMove2 = new Uint8Array(18);
+    for (i = 0; i < allMoves2.length; i++) {
+      isMove2[allMoves2[i]] = 1;
+    }
 
-      move(table, index, move) {
-        return Cube.moveTables[table][index][move];
-      }
-
-      pruning(table, index) {
-        return pruning(Cube.pruningTables[table], index);
-      }
-
-      solution() {
-        if (this.parent) {
-          return this.parent.solution() + moveNames[this.lastMove] + ' ';
-        }
-        return '';
-      }
-
-      moves1() {
-        if (this.lastMove !== null) {
-          return nextMoves1[this.lastMove / 3 | 0];
-        }
-        return allMoves1;
-      }
-
-      moves2() {
-        if (this.lastMove !== null) {
-          return nextMoves2[this.lastMove / 3 | 0];
-        }
-        return allMoves2;
-      }
-
-      minDist1() {
-        var axis, best, d1, d2;
-        best = 0;
-        for (axis = 0; axis < 3; axis++) {
-          d1 = this.pruning('sliceFlip', N_SLICE1 * this.axisFlip[axis] + this.axisSlice[axis]);
-          d2 = this.pruning('sliceTwist', N_SLICE1 * this.axisTwist[axis] + this.axisSlice[axis]);
-          best = max(best, max(d1, d2));
-        }
-        return best;
-      }
-
-      inPhase2() {
-        return this.flip === 0 && this.twist === 0 && this.slice === 0;
-      }
-
-      preparePhase2() {
-        if (!this.inPhase2()) {
-          return false;
-        }
-        this.URtoDF = this.move('mergeURtoDF', this.URtoUL, this.UBtoDF);
-        return this.URtoDF >= 0;
-      }
-
-      minDist2() {
-        var d1, d2, index1, index2;
-        index1 = (N_SLICE2 * this.URtoDF + this.FRtoBR) * N_PARITY + this.parity;
-        d1 = this.pruning('sliceURtoDFParity', index1);
-        index2 = (N_SLICE2 * this.URFtoDLF + this.FRtoBR) * N_PARITY + this.parity;
-        d2 = this.pruning('sliceURFtoDLFParity', index2);
-        return max(d1, d2);
-      }
-
-      next1(move) {
-        var next;
-        next = freeStates.pop();
-        next.parent = this;
-        next.lastMove = move;
-        next.depth = this.depth + 1;
-        var axis, mappedMove;
-        for (axis = 0; axis < 3; axis++) {
-          mappedMove = axisMoveMaps[axis][move];
-          next.axisFlip[axis] = this.move('flip', this.axisFlip[axis], mappedMove);
-          next.axisTwist[axis] = this.move('twist', this.axisTwist[axis], mappedMove);
-          next.axisSlice[axis] = this.move('FRtoBR', this.axisSlice[axis] * N_SLICE2, mappedMove) / N_SLICE2 | 0;
-        }
-        next.flip = next.axisFlip[0];
-        next.twist = next.axisTwist[0];
-        next.FRtoBR = this.move('FRtoBR', this.FRtoBR, move);
-        next.slice = next.axisSlice[0];
-        next.parity = this.move('parity', this.parity, move);
-        next.URFtoDLF = this.move('URFtoDLF', this.URFtoDLF, move);
-        next.URtoUL = this.move('URtoUL', this.URtoUL, move);
-        next.UBtoDF = this.move('UBtoDF', this.UBtoDF, move);
-        next.URtoDF = null;
-        return next;
-      }
-
-      next2(move) {
-        var next;
-        next = freeStates.pop();
-        next.parent = this;
-        next.lastMove = move;
-        next.depth = this.depth + 1;
-        next.URFtoDLF = this.move('URFtoDLF', this.URFtoDLF, move);
-        next.FRtoBR = this.move('FRtoBR', this.FRtoBR, move);
-        next.parity = this.move('parity', this.parity, move);
-        next.URtoDF = this.move('URtoDF', this.URtoDF, move);
-        return next;
-      }
-    };
-
+    moveStack = new Int32Array(Math.max(maxDepth, quickLength) + 2);
     nodes = 0;
-    solution = null;
+    solutionLength = -1;
     searchStarted = Date.now();
 
-    reportProgress = function(force) {
-      if (!force && nodes % reportEvery !== 0) {
-        return;
-      }
-      onProgress({
-        stage: 'proof-search',
-        depth: totalDepth,
-        upperBound: quickLength,
-        nodes: nodes,
-        elapsedMs: Date.now() - searchStarted
-      });
-    };
-
-    phase2 = function(current, remaining) {
-      var i, len, move, moves, next;
+    // Exhaustive search of the phase-2 subgroup for a solution of exactly
+    // `remaining` more moves. All coordinates are plain integers; the chosen
+    // move at each level is recorded in moveStack.
+    phase2Search = function(URtoDF, FRtoBR, URFtoDLF, parity, lastMove, remaining, depth) {
+      var d1, m, moves, n;
       nodes++;
-      reportProgress(false);
-      if (current.minDist2() > remaining) {
+      if (nodes % reportEvery === 0) {
+        onProgress({
+          stage: 'proof-search',
+          depth: totalDepth,
+          upperBound: quickLength,
+          nodes: nodes,
+          elapsedMs: Date.now() - searchStarted
+        });
+      }
+      d1 = (pruneP2URtoDF[((URtoDF * 24 + FRtoBR) * 2 + parity) >> 3] >>> ((((URtoDF * 24 + FRtoBR) * 2 + parity) & 7) << 2)) & 0xF;
+      if (d1 > remaining) {
+        return false;
+      }
+      n = (URFtoDLF * 24 + FRtoBR) * 2 + parity;
+      if (((pruneP2URFtoDLF[n >> 3] >>> ((n & 7) << 2)) & 0xF) > remaining) {
         return false;
       }
       if (remaining === 0) {
-        if (current.minDist2() === 0) {
-          solution = current.solution();
+        // Both pruning distances are zero only for the solved state.
+        if (d1 === 0 && ((pruneP2URFtoDLF[n >> 3] >>> ((n & 7) << 2)) & 0xF) === 0) {
+          solutionLength = depth;
           return true;
         }
         return false;
       }
-      moves = current.moves2();
-      for (i = 0, len = moves.length; i < len; i++) {
-        move = moves[i];
-        next = current.next2(move);
-        if (phase2(next, remaining - 1)) {
-          freeStates.push(next);
+      moves = lastMove < 0 ? allMoves2 : nextMoves2[lastMove / 3 | 0];
+      for (var im = 0; im < moves.length; im++) {
+        m = moves[im];
+        moveStack[depth] = m;
+        if (phase2Search(
+          URtoDFMove[URtoDF * 18 + m],
+          FRtoBRMove[FRtoBR * 18 + m],
+          URFtoDLFMove[URFtoDLF * 18 + m],
+          m % 3 === 1 ? parity : parity ^ 1,
+          m, remaining - 1, depth + 1
+        )) {
           return true;
         }
-        freeStates.push(next);
       }
       return false;
     };
 
-    exactSearch = function(current, remaining) {
-      var i, len, move, moves, next;
+    // Depth-limited exhaustive search over the full move group. Children are
+    // pruned before recursing: their phase-1 coordinates are computed first
+    // and the remaining coordinates only when every admissible bound fits
+    // within the remaining depth.
+    search1 = function(f0, t0, s0, f1, t1, s1, f2, t2, s2, FRtoBR, parity, URFtoDLF, URtoUL, UBtoDF, lastMove, remaining, depth) {
+      var idx, m, m1, m2, merged, moves, nf0, nf1, nf2, ns0, ns1, ns2, nt0, nt1, nt2, rem;
       nodes++;
-      reportProgress(false);
-      if (current.minDist1() > remaining) {
-        return false;
+      if (nodes % reportEvery === 0) {
+        onProgress({
+          stage: 'proof-search',
+          depth: totalDepth,
+          upperBound: quickLength,
+          nodes: nodes,
+          elapsedMs: Date.now() - searchStarted
+        });
       }
-
-      if (current.inPhase2() && current.preparePhase2()) {
-        if (phase2(current, remaining)) {
+      if ((f0 | t0 | s0) === 0 && (lastMove < 0 || isMove2[lastMove] === 0)) {
+        // The state is inside the phase-2 subgroup and was not reached by a
+        // phase-2 move (in that case the parent, also inside the subgroup,
+        // already searched the identical subgroup suffixes). Check every
+        // canonical subgroup suffix that fits the remaining depth. The
+        // unrestricted search below still continues, so solutions that
+        // leave and re-enter the subgroup are not missed.
+        merged = mergeTable[URtoUL * 336 + UBtoDF];
+        if (merged >= 0 && phase2Search(merged, FRtoBR, URFtoDLF, parity, lastMove, remaining, depth)) {
           return true;
         }
       }
-
       if (remaining === 0) {
         return false;
       }
-
-      moves = current.moves1();
-      for (i = 0, len = moves.length; i < len; i++) {
-        move = moves[i];
-        next = current.next1(move);
-        if (exactSearch(next, remaining - 1)) {
-          freeStates.push(next);
+      rem = remaining - 1;
+      moves = lastMove < 0 ? allMoves1 : nextMoves1[lastMove / 3 | 0];
+      for (var im = 0; im < moves.length; im++) {
+        m = moves[im];
+        nf0 = flipMove[f0 * 18 + m];
+        nt0 = twistMove[t0 * 18 + m];
+        ns0 = sliceMove[s0 * 18 + m];
+        idx = nf0 * N_SLICE1 + ns0;
+        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nt0 * N_SLICE1 + ns0;
+        if (((pruneSliceTwist[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nt0 * N_FLIP + nf0;
+        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        m1 = axisMove1[m];
+        nf1 = flipMove[f1 * 18 + m1];
+        nt1 = twistMove[t1 * 18 + m1];
+        ns1 = sliceMove[s1 * 18 + m1];
+        idx = nf1 * N_SLICE1 + ns1;
+        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nt1 * N_SLICE1 + ns1;
+        if (((pruneSliceTwist[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nt1 * N_FLIP + nf1;
+        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        m2 = axisMove2[m];
+        nf2 = flipMove[f2 * 18 + m2];
+        nt2 = twistMove[t2 * 18 + m2];
+        ns2 = sliceMove[s2 * 18 + m2];
+        idx = nf2 * N_SLICE1 + ns2;
+        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nt2 * N_SLICE1 + ns2;
+        if (((pruneSliceTwist[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        idx = nt2 * N_FLIP + nf2;
+        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+          continue;
+        }
+        moveStack[depth] = m;
+        if (search1(
+          nf0, nt0, ns0, nf1, nt1, ns1, nf2, nt2, ns2,
+          FRtoBRMove[FRtoBR * 18 + m],
+          m % 3 === 1 ? parity : parity ^ 1,
+          URFtoDLFMove[URFtoDLF * 18 + m],
+          URtoULMove[URtoUL * 18 + m],
+          UBtoDFMove[UBtoDF * 18 + m],
+          m, rem, depth + 1
+        )) {
           return true;
         }
-        freeStates.push(next);
       }
       return false;
     };
 
-    freeStates = (function() {
-      var m, ref, results;
-      results = [];
-      for (x = m = 0, ref = maxDepth + 2; (0 <= ref ? m <= ref : m >= ref); x = 0 <= ref ? ++m : --m) {
-        results.push(new State());
-      }
-      return results;
-    })();
+    axisCubes = [this, conjugateCube(this, 'x'), conjugateCube(this, 'z')];
+    rootFlip = [axisCubes[0].flip(), axisCubes[1].flip(), axisCubes[2].flip()];
+    rootTwist = [axisCubes[0].twist(), axisCubes[1].twist(), axisCubes[2].twist()];
+    rootSlice = [
+      axisCubes[0].FRtoBR() / N_SLICE2 | 0,
+      axisCubes[1].FRtoBR() / N_SLICE2 | 0,
+      axisCubes[2].FRtoBR() / N_SLICE2 | 0
+    ];
 
-    state = freeStates.pop().init(this);
     // Distance to the phase-2 subgroup is admissible in the full HTM move
     // graph. Phase-2-only distance is not: leaving the subgroup can sometimes
     // create a shorter unrestricted solution, so it must not raise this bound.
-    lowerBound = state.minDist1();
+    lowerBound = 0;
+    for (i = 0; i < 3; i++) {
+      rootDist = max(
+        pruning(pruneSliceFlip, rootFlip[i] * N_SLICE1 + rootSlice[i]),
+        pruning(pruneSliceTwist, rootTwist[i] * N_SLICE1 + rootSlice[i])
+      );
+      rootDist = max(rootDist, pruning(pruneTwistFlip, rootTwist[i] * N_FLIP + rootFlip[i]));
+      lowerBound = max(lowerBound, rootDist);
+    }
 
     // If the quick result is within God's Number, proving every shorter
     // depth is enough. If it is longer, search through depth 20 inclusive;
@@ -1232,12 +1175,21 @@
         nodes: nodes,
         elapsedMs: Date.now() - searchStarted
       });
-      if (exactSearch(state, totalDepth)) {
-        freeStates.push(state);
-        solution = solution.trim();
+      if (search1(
+        rootFlip[0], rootTwist[0], rootSlice[0],
+        rootFlip[1], rootTwist[1], rootSlice[1],
+        rootFlip[2], rootTwist[2], rootSlice[2],
+        this.FRtoBR(), this.cornerParity(), this.URFtoDLF(), this.URtoUL(), this.UBtoDF(),
+        -1, totalDepth, 0
+      )) {
+        tokens = [];
+        for (i = 0; i < solutionLength; i++) {
+          tokens.push(moveNames[moveStack[i]]);
+        }
+        solution = tokens.join(' ');
         return {
           algorithm: solution,
-          optimalLength: solution ? solution.split(/\s+/).length : 0,
+          optimalLength: solutionLength,
           quickLength: quickLength,
           nodes: nodes,
           elapsedMs: Date.now() - searchStarted,
@@ -1246,7 +1198,6 @@
       }
     }
 
-    freeStates.push(state);
     if (quickLength <= maxDepth) {
       return {
         algorithm: quickSolution,
