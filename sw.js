@@ -1,4 +1,4 @@
-const CACHE_NAME = 'twenty-v6-parallel';
+const CACHE_NAME = 'twenty-v7-telemetry-fit';
 const APP_SHELL = [
   './',
   './index.html',

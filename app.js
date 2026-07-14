@@ -936,8 +936,10 @@ function updateSolveProgress(progress = {}) {
   const nodes = Number.isFinite(progress.nodes) ? progress.nodes : 0;
   const secs = (progress.elapsedMs || 0) / 1000;
   const rate = secs > 0.2 ? nodes / secs : 0;
-  dom.statNodes.textContent = formatInteger(nodes);
-  dom.statRate.textContent = rate ? formatInteger(rate) : '—';
+  dom.statNodes.textContent = formatCompact(nodes);
+  dom.statNodes.title = `${formatInteger(nodes)} positions`;
+  dom.statRate.textContent = rate ? formatCompact(rate) : '—';
+  dom.statRate.title = rate ? `${formatInteger(rate)} positions / sec` : '';
   dom.statCores.textContent = String(cores);
   dom.statJobs.textContent = (Number.isFinite(progress.jobsTotal) && progress.jobsTotal > 0)
     ? `${formatInteger(progress.jobsDone || 0)} / ${formatInteger(progress.jobsTotal)}`
@@ -1572,6 +1574,14 @@ function showToast(message) {
 
 function formatInteger(value) {
   return new Intl.NumberFormat().format(Math.max(0, Math.round(value || 0)));
+}
+
+// Compact form for large, unbounded counters so they never overflow their box
+// (e.g. 122000000 -> "122M", 6286068 -> "6.3M"). Below 1000 stays exact.
+function formatCompact(value) {
+  const n = Math.max(0, Math.round(value || 0));
+  if (n < 1000) return String(n);
+  return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 }
 
 function formatDuration(ms) {

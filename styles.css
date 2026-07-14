@@ -241,8 +241,8 @@ h2 { letter-spacing: -.025em; }
 
 /* Nerdy proof-depth ladder: no-solution-≤ · searching · best-known · God's Number */
 .proof-ladder { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
-.ladder-cell { display: grid; gap: 2px; justify-items: center; padding: 8px 12px; min-width: 60px; border-radius: 11px; background: rgba(255,255,255,.04); border: 1px solid var(--line); }
-.ladder-cell em { font-style: normal; font-weight: 800; font-size: 1.15rem; color: #eaf1f6; }
+.ladder-cell { display: grid; gap: 2px; justify-items: center; padding: 8px 12px; min-width: 60px; border-radius: 11px; background: rgba(255,255,255,.04); border: 1px solid var(--line); overflow: hidden; }
+.ladder-cell em { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; font-style: normal; font-weight: 800; font-size: 1.15rem; color: #eaf1f6; }
 .ladder-cell small { font-size: .56rem; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
 .ladder-cell.active { background: rgba(20,184,166,.16); border-color: rgba(20,184,166,.5); }
 .ladder-cell.active em { color: var(--accent-soft); }
@@ -251,9 +251,9 @@ h2 { letter-spacing: -.025em; }
 .ladder-arrow { align-self: center; color: var(--muted); font-weight: 800; }
 
 /* Live search telemetry grid */
-.proof-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 8px; }
-.proof-stats .stat { display: grid; gap: 2px; padding: 8px 10px; border-radius: 11px; background: rgba(255,255,255,.03); border: 1px solid var(--line); }
-.proof-stats .stat em { font-style: normal; font-weight: 800; font-size: 1rem; color: #eaf1f6; font-variant-numeric: tabular-nums; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+.proof-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.proof-stats .stat { display: grid; gap: 2px; min-width: 0; padding: 8px 10px; border-radius: 11px; background: rgba(255,255,255,.03); border: 1px solid var(--line); overflow: hidden; }
+.proof-stats .stat em { min-width: 0; max-width: 100%; overflow: hidden; overflow-wrap: anywhere; font-style: normal; font-weight: 800; font-size: 1rem; color: #eaf1f6; font-variant-numeric: tabular-nums; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
 .proof-stats .stat small { font-size: .56rem; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
 .progress-spinner { width: 24px; height: 24px; border-radius: 50%; border: 3px solid rgba(255,255,255,.15); border-top-color: var(--warn); animation: solver-spin .8s linear infinite; }
 @keyframes solver-spin { to { transform: rotate(360deg); } }
