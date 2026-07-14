@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cubescan-v4-fast-solver';
+const CACHE_NAME = 'cubescan-v5-3d-cube';
 const APP_SHELL = [
   './',
   './index.html',

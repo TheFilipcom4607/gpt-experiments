@@ -2,6 +2,8 @@
 
 An installable, offline-capable 3×3 Rubik's Cube scanner and solver. It uses the phone camera to sample nine sticker colors per face, balances the color assignment to exactly nine stickers per color, validates whether the state is physically possible, and generates a provably shortest move-by-move solution in a Web Worker.
 
+The solution is played back on an interactive 3D cube built with pure CSS transforms (no libraries, so it still works offline). It renders your actual scanned sticker colors, animates each turn as you step through the moves, and you can drag it to rotate the view.
+
 ## Run it locally
 
 Camera access requires a secure context. `localhost` counts as secure.

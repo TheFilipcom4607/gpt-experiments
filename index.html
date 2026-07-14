@@ -188,10 +188,12 @@
 
         <div id="solutionPlayer" class="solution-player hidden">
           <div class="move-visual-card">
-            <div id="moveNet" class="move-net" aria-hidden="true"></div>
-            <div id="turnArrow" class="turn-arrow" aria-hidden="true">
-              <svg viewBox="0 0 100 100"><path d="M24 65A32 32 0 1 1 75 66"/><path d="M73 54l3 14-14-3"/></svg>
-              <span id="doubleBadge" class="double-badge hidden">×2</span>
+            <div id="cubeViewport" class="cube-viewport" aria-label="3D cube preview of the current move">
+              <div id="cube3d" class="cube3d" aria-hidden="true"></div>
+            </div>
+            <div class="visual-toolbar">
+              <button id="replayMoveButton" class="button secondary small" type="button">Replay turn</button>
+              <span class="drag-hint">Drag the cube to rotate the view</span>
             </div>
           </div>
           <div class="move-copy-card">

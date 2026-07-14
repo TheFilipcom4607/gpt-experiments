@@ -22,11 +22,68 @@ const state = {
   solution: [],
   solutionIndex: 0,
   solutionMeta: null,
+  solvedCube: null,
   solving: false,
   solveCancelled: false,
 };
 
 const dom = {};
+
+// 3D cube preview shown on the solve screen. The logical cube state is kept
+// in `baseCube` (the scanned cube); `displayCube` tracks whatever the cube
+// currently shows so a single move can be animated in place.
+const view3d = {
+  baseCube: null,
+  displayCube: null,
+  index: 0,
+  animating: false,
+  rotX: -26,
+  rotY: -34,
+  cubies: [],
+  faceletEls: null,
+};
+
+// Facelet-string layout is U R F D L B, nine stickers each. For a cubie at
+// grid (x,y,z) with x,y,z in {-1,0,1} (x right, y up, z toward viewer), map
+// each outward face to its index in that 54-char string.
+const FACELET_BASE = { U: 0, R: 9, F: 18, D: 27, L: 36, B: 45 };
+function faceletIndexFor(face, x, y, z) {
+  let row;
+  let col;
+  switch (face) {
+    case 'U': row = z + 1; col = x + 1; break;          // looking down, back row first
+    case 'D': row = 1 - z; col = x + 1; break;          // looking up, front row first
+    case 'F': row = 1 - y; col = x + 1; break;
+    case 'B': row = 1 - y; col = 1 - x; break;
+    case 'R': row = 1 - y; col = 1 - z; break;
+    case 'L': row = 1 - y; col = z + 1; break;
+    default: return -1;
+  }
+  return FACELET_BASE[face] + row * 3 + col;
+}
+
+// Which CSS transform orients a small cubie face outward, per face.
+const CUBIE_FACE_TRANSFORM = {
+  U: 'rotateX(90deg)',
+  D: 'rotateX(-90deg)',
+  F: '',
+  B: 'rotateY(180deg)',
+  R: 'rotateY(90deg)',
+  L: 'rotateY(-90deg)',
+};
+
+// Move -> rotation axis and the sign of a clockwise (unprimed) quarter turn,
+// plus which layer coordinate it turns. Calibrated to the coordinate system
+// above and CSS's left-handed rotation sense.
+const MOVE_GEOMETRY = {
+  U: { axis: 'Y', coord: 'y', layer: 1, sign: -1 },
+  D: { axis: 'Y', coord: 'y', layer: -1, sign: 1 },
+  R: { axis: 'X', coord: 'x', layer: 1, sign: -1 },
+  L: { axis: 'X', coord: 'x', layer: -1, sign: 1 },
+  F: { axis: 'Z', coord: 'z', layer: 1, sign: 1 },
+  B: { axis: 'Z', coord: 'z', layer: -1, sign: -1 },
+};
+
 let deferredInstallPrompt = null;
 let toastTimer = null;
 let solverWorker = null;
@@ -57,7 +114,8 @@ function init() {
   initInstallHandling();
   registerServiceWorker();
   renderHomeState();
-  renderMoveNet();
+  buildCube3D();
+  initCubeDrag();
   showView('homeView');
 }
 
@@ -70,7 +128,7 @@ function cacheDom() {
     'cubeNet', 'selectedStickerText', 'colorPalette', 'colorCounts', 'validationBox',
     'solveProgress', 'solveProgressTitle', 'solveProgressDetail', 'solveProgressBar', 'solveButton',
     'cancelSolveButton', 'rescanButton', 'clearButton', 'moveCounter', 'optimalProof', 'solvedMessage',
-    'solutionPlayer', 'moveNet', 'turnArrow', 'doubleBadge', 'movePosition', 'moveNotation',
+    'solutionPlayer', 'cubeViewport', 'cube3d', 'replayMoveButton', 'movePosition', 'moveNotation',
     'moveInstruction', 'previousMoveButton', 'nextMoveButton', 'algorithmText',
     'newScanButton', 'toast'
   ];
@@ -95,8 +153,12 @@ function bindEvents() {
   dom.clearButton.addEventListener('click', clearScan);
   dom.previousMoveButton.addEventListener('click', () => setSolutionStep(state.solutionIndex - 1));
   dom.nextMoveButton.addEventListener('click', nextSolutionStep);
+  dom.replayMoveButton.addEventListener('click', () => previewTurn3D(state.solution[state.solutionIndex]));
   dom.newScanButton.addEventListener('click', clearScan);
-  window.addEventListener('resize', positionCameraShades);
+  window.addEventListener('resize', () => {
+    positionCameraShades();
+    if (dom.solveView.classList.contains('active')) sizeCube3D();
+  });
   document.addEventListener('keydown', (event) => {
     if (!dom.solveView.classList.contains('active') || !state.solution.length) return;
     if (event.key === 'ArrowRight') { event.preventDefault(); nextSolutionStep(); }
@@ -112,6 +174,7 @@ function showView(id) {
   document.querySelectorAll('.view').forEach((view) => view.classList.toggle('active', view.id === id));
   dom.homeButton.classList.toggle('hidden', id === 'homeView');
   window.scrollTo({ top: 0, behavior: 'auto' });
+  if (id === 'solveView') requestAnimationFrame(sizeCube3D);
 }
 
 function goHome() {
@@ -726,6 +789,7 @@ async function solveCube() {
     state.solution = algorithm.trim() ? algorithm.trim().split(/\s+/) : [];
     state.solutionIndex = 0;
     state.solutionMeta = result;
+    state.solvedCube = validation.cube.clone();
     renderSolution();
     showView('solveView');
   } catch (error) {
@@ -892,25 +956,99 @@ function renderSolution() {
     button.addEventListener('click', () => setSolutionStep(index));
     dom.algorithmText.appendChild(button);
   });
-  if (!solved) setSolutionStep(0);
+
+  view3d.baseCube = state.solvedCube || null;
+  view3d.index = 0;
+  if (view3d.baseCube) {
+    setCube3DApplied(0);
+    sizeCube3D();
+  }
+  if (!solved) updateStepDescriptor(0);
 }
 
-function renderMoveNet() {
-  dom.moveNet.innerHTML = '';
-  ['U', 'L', 'F', 'R', 'B', 'D'].forEach((face) => {
-    const element = document.createElement('div');
-    element.className = 'mini-face';
-    element.dataset.face = face;
-    for (let i = 0; i < 9; i += 1) {
-      const tile = document.createElement('i');
-      tile.style.background = displayColor(face);
-      element.appendChild(tile);
+function buildCube3D() {
+  dom.cube3d.innerHTML = '';
+  view3d.cubies = [];
+  const faces = ['U', 'D', 'F', 'B', 'R', 'L'];
+  for (let x = -1; x <= 1; x += 1) {
+    for (let y = -1; y <= 1; y += 1) {
+      for (let z = -1; z <= 1; z += 1) {
+        if (x === 0 && y === 0 && z === 0) continue;
+        const cubie = document.createElement('div');
+        cubie.className = 'cubie';
+        const core = document.createElement('div');
+        core.className = 'cubie-core';
+        cubie.appendChild(core);
+        const faceEls = {};
+        faces.forEach((face) => {
+          const onFace =
+            (face === 'U' && y === 1) || (face === 'D' && y === -1) ||
+            (face === 'F' && z === 1) || (face === 'B' && z === -1) ||
+            (face === 'R' && x === 1) || (face === 'L' && x === -1);
+          if (!onFace) return;
+          const facelet = document.createElement('span');
+          facelet.className = 'facelet';
+          facelet.dataset.face = face;
+          faceEls[face] = facelet;
+          cubie.appendChild(facelet);
+        });
+        view3d.cubies.push({ el: cubie, core, x, y, z, faces: faceEls });
+        dom.cube3d.appendChild(cubie);
+      }
     }
-    dom.moveNet.appendChild(element);
+  }
+  sizeCube3D();
+  applyView3D();
+}
+
+function sizeCube3D() {
+  // The rotated cube projects a footprint roughly 1.5x its edge, so size it
+  // from the smaller viewport dimension divided by that factor to avoid
+  // clipping against the card on narrow screens.
+  const vpW = dom.cubeViewport?.clientWidth || 320;
+  const vpH = dom.cubeViewport?.clientHeight || 320;
+  const avail = Math.min(vpW, vpH || vpW);
+  const cubeSize = Math.max(140, Math.min(280, avail / 1.5));
+  const cubie = cubeSize / 3;
+  const half = cubie / 2;
+  dom.cube3d.style.setProperty('--cube-size', `${cubeSize}px`);
+  dom.cube3d.style.setProperty('--cubie', `${cubie}px`);
+  view3d.cubies.forEach((cubie3d) => {
+    cubie3d.core.style.transform = 'translateZ(0)';
+    Object.entries(cubie3d.faces).forEach(([face, el]) => {
+      el.style.transform = `${CUBIE_FACE_TRANSFORM[face]} translateZ(${half}px)`.trim();
+    });
+    homeTransform(cubie3d);
   });
 }
 
-function setSolutionStep(index) {
+function homeTransform(cubie3d) {
+  const gap = parseFloat(getComputedStyle(dom.cube3d).getPropertyValue('--cubie')) || 66;
+  const tx = cubie3d.x * gap;
+  const ty = -cubie3d.y * gap;
+  const tz = cubie3d.z * gap;
+  cubie3d.el.style.transform = `translate3d(${tx}px, ${ty}px, ${tz}px)`;
+  cubie3d.homePos = `translate3d(${tx}px, ${ty}px, ${tz}px)`;
+}
+
+function applyView3D() {
+  dom.cube3d.style.transform = `rotateX(${view3d.rotX}deg) rotateY(${view3d.rotY}deg)`;
+}
+
+function paintCube3D(cube) {
+  if (!cube || !view3d.cubies.length) return;
+  const facelets = cube.asString();
+  view3d.cubies.forEach((cubie3d) => {
+    Object.entries(cubie3d.faces).forEach(([face, el]) => {
+      const idx = faceletIndexFor(face, cubie3d.x, cubie3d.y, cubie3d.z);
+      const letter = facelets[idx];
+      el.style.background = displayColor(letter);
+    });
+  });
+}
+
+// Update only the text/controls of the move player, without touching the cube.
+function updateStepDescriptor(index) {
   if (!state.solution.length) return;
   state.solutionIndex = Math.max(0, Math.min(state.solution.length - 1, index));
   const token = state.solution[state.solutionIndex];
@@ -921,17 +1059,31 @@ function setSolutionStep(index) {
   dom.moveInstruction.textContent = moveInstruction(face, suffix);
   dom.previousMoveButton.disabled = state.solutionIndex === 0;
   dom.nextMoveButton.textContent = state.solutionIndex === state.solution.length - 1 ? 'Finish' : 'Next move';
-  document.querySelectorAll('.mini-face').forEach((element) => element.classList.toggle('active', element.dataset.face === face));
   document.querySelectorAll('.alg-token').forEach((element, tokenIndex) => element.classList.toggle('current', tokenIndex === state.solutionIndex));
-  positionTurnArrow(face, suffix);
+}
+
+// Jump to a step: update the descriptor and rebuild the cube instantly to the
+// state before the described move.
+function setSolutionStep(index) {
+  if (!state.solution.length) return;
+  updateStepDescriptor(index);
+  setCube3DApplied(state.solutionIndex);
 }
 
 function nextSolutionStep() {
-  if (state.solutionIndex >= state.solution.length - 1) {
+  if (!state.solution.length || view3d.animating) return;
+  const i = state.solutionIndex;
+  const isLast = i >= state.solution.length - 1;
+  // Already fully applied (last move performed): don't re-apply, just remind.
+  if (isLast && view3d.index >= state.solution.length) {
     showToast('Done — your cube should now be solved.');
     return;
   }
-  setSolutionStep(state.solutionIndex + 1);
+  // Commit the described move with an animated turn, then advance the label.
+  animateMove3D(state.solution[i], () => {
+    if (isLast) showToast('Done — your cube should now be solved.');
+  });
+  if (!isLast) updateStepDescriptor(i + 1);
 }
 
 function moveInstruction(face, suffix) {
@@ -941,20 +1093,119 @@ function moveInstruction(face, suffix) {
   return `Turn the ${name} face clockwise`;
 }
 
-function positionTurnArrow(face, suffix) {
-  requestAnimationFrame(() => {
-    const visual = document.querySelector('.move-visual-card');
-    const active = dom.moveNet.querySelector(`.mini-face[data-face="${face}"]`);
-    if (!visual || !active) return;
-    const visualRect = visual.getBoundingClientRect();
-    const faceRect = active.getBoundingClientRect();
-    dom.turnArrow.style.left = `${faceRect.left - visualRect.left + faceRect.width / 2}px`;
-    dom.turnArrow.style.top = `${faceRect.top - visualRect.top + faceRect.height / 2}px`;
-    dom.turnArrow.style.width = `${Math.max(84, faceRect.width * 0.94)}px`;
-    dom.turnArrow.classList.toggle('counter', suffix === "'");
-    dom.turnArrow.classList.toggle('double', suffix === '2');
-    dom.doubleBadge.classList.toggle('hidden', suffix !== '2');
+// Rebuild the cube to `count` applied moves, cancelling any running animation.
+function setCube3DApplied(count) {
+  if (!view3d.baseCube) return;
+  clearTimeout(view3d.animTimer);
+  view3d.animating = false;
+  const cube = view3d.baseCube.clone();
+  const moves = state.solution.slice(0, count).join(' ');
+  if (moves) cube.move(moves);
+  view3d.displayCube = cube;
+  view3d.index = count;
+  view3d.cubies.forEach((cubie3d) => {
+    cubie3d.el.classList.remove('turning');
+    cubie3d.el.style.transitionDuration = '';
+    homeTransform(cubie3d);
   });
+  paintCube3D(cube);
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function turnParams(token) {
+  const geo = MOVE_GEOMETRY[token[0]];
+  if (!geo) return null;
+  const suffix = token.slice(1);
+  const quarter = suffix === '2' ? 2 : 1;
+  const dir = suffix === "'" ? -1 : 1;
+  return {
+    geo,
+    quarter,
+    angle: geo.sign * dir * 90 * quarter,
+    duration: quarter === 2 ? 460 : 340,
+    layer: view3d.cubies.filter((c) => c[geo.coord] === geo.layer),
+  };
+}
+
+// Animate a move and bake it into the displayed cube state.
+function animateMove3D(token, done) {
+  const params = view3d.displayCube ? turnParams(token) : null;
+  if (!params) { if (done) done(); return; }
+  const commit = () => {
+    const cube = view3d.displayCube.clone();
+    cube.move(token);
+    view3d.displayCube = cube;
+    view3d.index += 1;
+    params.layer.forEach((c) => { c.el.classList.remove('turning'); c.el.style.transitionDuration = ''; homeTransform(c); });
+    paintCube3D(cube);
+    view3d.animating = false;
+    if (done) done();
+  };
+  if (prefersReducedMotion()) { commit(); return; }
+  view3d.animating = true;
+  params.layer.forEach((c) => {
+    c.el.style.transitionDuration = `${params.duration}ms`;
+    c.el.classList.add('turning');
+    c.el.style.transform = `rotate${params.geo.axis}(${params.angle}deg) ${c.homePos}`;
+  });
+  clearTimeout(view3d.animTimer);
+  view3d.animTimer = setTimeout(commit, params.duration + 40);
+}
+
+// Preview a move by turning the layer and returning it, without committing.
+function previewTurn3D(token) {
+  if (view3d.animating || !view3d.displayCube) return;
+  const params = turnParams(token);
+  if (!params) return;
+  if (prefersReducedMotion()) return;
+  view3d.animating = true;
+  params.layer.forEach((c) => {
+    c.el.style.transitionDuration = `${params.duration}ms`;
+    c.el.classList.add('turning');
+    c.el.style.transform = `rotate${params.geo.axis}(${params.angle}deg) ${c.homePos}`;
+  });
+  clearTimeout(view3d.animTimer);
+  view3d.animTimer = setTimeout(() => {
+    params.layer.forEach((c) => { c.el.style.transform = `rotate${params.geo.axis}(0deg) ${c.homePos}`; });
+    clearTimeout(view3d.animTimer);
+    view3d.animTimer = setTimeout(() => {
+      params.layer.forEach((c) => { c.el.classList.remove('turning'); c.el.style.transitionDuration = ''; homeTransform(c); });
+      view3d.animating = false;
+    }, params.duration + 40);
+  }, params.duration + 40);
+}
+
+// Drag the cube to rotate the camera view.
+function initCubeDrag() {
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+  const onDown = (event) => {
+    dragging = true;
+    lastX = event.clientX;
+    lastY = event.clientY;
+    dom.cubeViewport.setPointerCapture?.(event.pointerId);
+  };
+  const onMove = (event) => {
+    if (!dragging) return;
+    view3d.rotY += (event.clientX - lastX) * 0.55;
+    view3d.rotX -= (event.clientY - lastY) * 0.55;
+    view3d.rotX = Math.max(-88, Math.min(88, view3d.rotX));
+    lastX = event.clientX;
+    lastY = event.clientY;
+    applyView3D();
+  };
+  const onUp = (event) => {
+    dragging = false;
+    dom.cubeViewport.releasePointerCapture?.(event.pointerId);
+  };
+  dom.cubeViewport.addEventListener('pointerdown', onDown);
+  dom.cubeViewport.addEventListener('pointermove', onMove);
+  dom.cubeViewport.addEventListener('pointerup', onUp);
+  dom.cubeViewport.addEventListener('pointercancel', onUp);
 }
 
 function displayColor(face) {
