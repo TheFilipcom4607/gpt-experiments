@@ -279,9 +279,12 @@
     Cube.prototype[key] = value;
   }
 
-  // Move tables are flat Int32Arrays with a stride of 18: the entry for
+  // Move tables are flat Uint16Arrays with a stride of 18: the entry for
   // coordinate i after move m lives at index i * 18 + m. Flat typed arrays
-  // keep the hot search loops free of nested array dereferences.
+  // keep the hot search loops free of nested array dereferences. Every stored
+  // value is a coordinate < 20160, so 16-bit cells halve the tables' memory
+  // footprint versus Int32 — the IDA* search is cache-bound on these lookups,
+  // so the smaller resident set is a direct speedup.
   computeMoveTable = function(context, coord, size) {
     var apply, cube, i, j, k, move, table;
     // Loop through all valid values for the coordinate, setting cube's
@@ -289,7 +292,7 @@
     // cube, and compute the resulting coordinate.
     apply = context === 'corners' ? 'cornerMultiply' : 'edgeMultiply';
     cube = new Cube;
-    table = new Int32Array(size * 18);
+    table = new Uint16Array(size * 18);
     for (i = 0; i < size; i++) {
       cube[coord](i);
       for (j = 0; j <= 5; j++) {
@@ -405,8 +408,10 @@
         this.moveTables.mergeURtoDF = (function() {
           var UBtoDF, URtoUL, merged;
           // Flat with a stride of 336: merged coordinate for the pair
-          // (URtoUL, UBtoDF) lives at URtoUL * 336 + UBtoDF.
-          merged = new Int32Array(336 * 336);
+          // (URtoUL, UBtoDF) lives at URtoUL * 336 + UBtoDF. Values are a
+          // URtoDF coordinate (< 20160) or -1 for a collision, both of which
+          // fit in a signed 16-bit cell, halving this table versus Int32.
+          merged = new Int16Array(336 * 336);
           for (URtoUL = 0; URtoUL <= 335; URtoUL++) {
             for (UBtoDF = 0; UBtoDF <= 335; UBtoDF++) {
               merged[URtoUL * 336 + UBtoDF] = mergeURtoDF(URtoUL, UBtoDF);
@@ -420,7 +425,7 @@
         if (tableName === 'FRtoBR') {
           this.moveTables.slice = (function(FRtoBR) {
             var move, slice, table;
-            table = new Int32Array(N_SLICE1 * 18);
+            table = new Uint16Array(N_SLICE1 * 18);
             for (slice = 0; slice < N_SLICE1; slice++) {
               for (move = 0; move < 18; move++) {
                 table[slice * 18 + move] = FRtoBR[slice * N_SLICE2 * 18 + move] / N_SLICE2 | 0;
@@ -1080,48 +1085,48 @@
         nf0 = flipMove[f0 * 18 + m];
         nt0 = twistMove[t0 * 18 + m];
         ns0 = sliceMove[s0 * 18 + m];
-        idx = nf0 * N_SLICE1 + ns0;
-        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+        idx = nt0 * N_FLIP + nf0;
+        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
           continue;
         }
         idx = nt0 * N_SLICE1 + ns0;
         if (((pruneSliceTwist[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
           continue;
         }
-        idx = nt0 * N_FLIP + nf0;
-        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+        idx = nf0 * N_SLICE1 + ns0;
+        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
           continue;
         }
         m1 = axisMove1[m];
         nf1 = flipMove[f1 * 18 + m1];
         nt1 = twistMove[t1 * 18 + m1];
         ns1 = sliceMove[s1 * 18 + m1];
-        idx = nf1 * N_SLICE1 + ns1;
-        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+        idx = nt1 * N_FLIP + nf1;
+        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
           continue;
         }
         idx = nt1 * N_SLICE1 + ns1;
         if (((pruneSliceTwist[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
           continue;
         }
-        idx = nt1 * N_FLIP + nf1;
-        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+        idx = nf1 * N_SLICE1 + ns1;
+        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
           continue;
         }
         m2 = axisMove2[m];
         nf2 = flipMove[f2 * 18 + m2];
         nt2 = twistMove[t2 * 18 + m2];
         ns2 = sliceMove[s2 * 18 + m2];
-        idx = nf2 * N_SLICE1 + ns2;
-        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+        idx = nt2 * N_FLIP + nf2;
+        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
           continue;
         }
         idx = nt2 * N_SLICE1 + ns2;
         if (((pruneSliceTwist[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
           continue;
         }
-        idx = nt2 * N_FLIP + nf2;
-        if (((pruneTwistFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
+        idx = nf2 * N_SLICE1 + ns2;
+        if (((pruneSliceFlip[idx >> 3] >>> ((idx & 7) << 2)) & 0xF) > rem) {
           continue;
         }
         moveStack[depth] = m;

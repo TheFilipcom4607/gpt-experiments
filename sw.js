@@ -1,4 +1,4 @@
-const CACHE_NAME = 'twenty-v8-live-counter';
+const CACHE_NAME = 'twenty-v9-faster-tables';
 const APP_SHELL = [
   './',
   './index.html',
